@@ -20,8 +20,10 @@ export async function GET(request: Request) {
    
 
     if (!error) {
+      console.log("Successfully exchanged code for session:", data);
       return NextResponse.redirect(new URL(destination, requestUrl.origin));
-
+    } else {
+      console.error("Error exchanging code for session:", error);
     }
 
   }

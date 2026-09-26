@@ -3,22 +3,23 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BsEye, BsEyeSlash, BsExclamationTriangleFill } from "react-icons/bs";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { login, type AuthState } from "@/app/actions/auth";
 import { useActionState } from "react";
 import { SocialAuthButtons } from "@/components/auth/social-auth-buttons";
 import { AuthLayout } from "@/components/auth/auth-layout";
 
 export default function LoginPage() {
-  const [showPassword, setShowPassword] = useState(false);
-  const [callbackMessage, setCallbackMessage] = useState<string | null>(null);
-  const [state, formAction, isPending] = useActionState<AuthState, FormData>(login, {});
+  return <Suspense fallback={null}><LoginForm /></Suspense>;
+}
 
-  useEffect(() => {
-    setCallbackMessage(new URLSearchParams(window.location.search).get("message"));
-  }, []);
+function LoginForm() {
+  const [showPassword, setShowPassword] = useState(false);
+  const searchParams = useSearchParams();
+  const callbackMessage = searchParams.get("message");
+  const [state, formAction, isPending] = useActionState<AuthState, FormData>(login, {});
 
   return (
     <AuthLayout

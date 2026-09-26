@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { FcGoogle } from "react-icons/fc";
 import microsoftIcon from "@/public/microsoft-icon.svg";
 
@@ -47,7 +48,7 @@ export function SocialAuthButtons() {
         disabled={Boolean(isPending)}
         className="flex h-11 items-center justify-center gap-3 rounded-xl border border-gray-300 bg-white font-medium text-gray-700 shadow-xs hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-60 cursor-pointer"
       >
-        <img src={microsoftIcon.src} alt="" className="h-5 w-5" />
+        <Image src={microsoftIcon} alt="" className="h-5 w-5" />
         <span>{isPending === "azure" ? "Connecting..." : "Microsoft"}</span>
       </button>
       {error && <p className="text-sm text-destructive" role="alert">{error}</p>}

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Activity,
   ArrowUpRight,
@@ -59,7 +59,7 @@ const activity = [
 
 function Sidebar({ onClose }: { onClose?: () => void }) {
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-gray-200 bg-white px-4 py-5">
+    <aside className="flex h-screen w-64 shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-white px-4 py-5 lg:fixed lg:inset-y-0 lg:left-0 lg:z-40">
       <div className="flex items-center justify-between px-2">
         <Link href="/" className="flex items-center gap-2" onClick={onClose}>
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-white shadow-sm shadow-purple-200">
@@ -165,7 +165,7 @@ export function DashboardShell({ email }: DashboardShellProps) {
           </div>
         )}
 
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 lg:ml-64">
           <header className="flex h-18 items-center justify-between border-b border-gray-200 bg-white px-4 sm:px-8">
             <div className="flex items-center gap-3">
               <button type="button" onClick={() => setMobileNavOpen(true)} className="rounded-lg p-2 text-gray-600 hover:bg-gray-100 lg:hidden" aria-label="Open navigation">

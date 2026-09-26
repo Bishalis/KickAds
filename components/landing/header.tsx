@@ -59,9 +59,9 @@ export function Header() {
             )}
           </div>
 
-          <a href="/#pricing" className="text-sm font-medium text-gray-700 hover:text-primary transition-colors">
+          <Link href="/#pricing" className="text-sm font-medium text-gray-700 hover:text-primary transition-colors">
             Pricing
-          </a>
+          </Link>
         </nav>
 
         {/* Desktop Auth Buttons */}

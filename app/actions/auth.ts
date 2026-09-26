@@ -2,6 +2,8 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
+import { gmailTokenCookie } from "@/lib/email/google-oauth";
 
 export type AuthState = {
   error?: string;
@@ -104,5 +106,7 @@ export async function logout() {
   if (error) {
     throw new Error(error.message);
   }
+  const cookieStore = await cookies();
+  cookieStore.delete(gmailTokenCookie);
   redirect("/");
 }

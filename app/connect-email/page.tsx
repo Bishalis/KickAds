@@ -1,36 +1,39 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { ArrowLeft, Check, Inbox, LockKeyhole, Mail, ShieldCheck } from "lucide-react";
+import { Suspense, useEffect, useState } from "react";
+import { ArrowLeft, Check, Inbox, LockKeyhole, Mail, Plus, ShieldCheck, Unplug } from "lucide-react";
 import { FcGoogle } from "react-icons/fc";
-import { createClient } from "@/lib/supabase/client";
+import { useSearchParams } from "next/navigation";
 
 export default function ConnectEmailPage() {
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [error, setError] = useState<string>();
+  return <Suspense fallback={null}><ConnectEmailContent /></Suspense>;
+}
 
-  async function connectGoogle() {
-    setError(undefined);
-    setIsConnecting(true);
+function ConnectEmailContent() {
+  const searchParams = useSearchParams();
+  const error = searchParams.get("error");
+  const connected = searchParams.get("connected") === "true";
+  const [connectedEmail, setConnectedEmail] = useState<string | null>(null);
+  const [isCheckingConnection, setIsCheckingConnection] = useState(true);
 
-    const supabase = createClient();
-    const { error: authError } = await supabase.auth.linkIdentity({
-      provider: "google",
-      options: {
-        redirectTo: `${window.location.origin}/auth/callback?next=/connect-email`,
-        scopes: "https://www.googleapis.com/auth/gmail.readonly",
-        queryParams: {
-          access_type: "offline",
-          prompt: "consent",
-        },
-      },
-    });
-
-    if (authError) {
-      setError(authError.message);
-      setIsConnecting(false);
+  useEffect(() => {
+    async function loadConnection() {
+      try {
+        const response = await fetch("/api/gmail/status");
+        const data = await response.json();
+        if (response.ok) setConnectedEmail(data.gmailConnected ? data.email : null);
+      } finally {
+        setIsCheckingConnection(false);
+      }
     }
+
+    void loadConnection();
+  }, []);
+
+  async function disconnectEmail() {
+    const response = await fetch("/api/gmail/disconnect", { method: "POST" });
+    if (response.ok) setConnectedEmail(null);
   }
 
   return (
@@ -62,18 +65,25 @@ export default function ConnectEmailPage() {
                 <Mail className="h-6 w-6" />
               </div>
               <h2 className="mt-6 text-2xl font-bold tracking-tight">Connect an email account</h2>
-              <p className="mt-2 max-w-md text-sm leading-6 text-gray-500">Start with Gmail. KickAds requests read-only access so it can understand the senders in your inbox.</p>
+              <p className="mt-2 max-w-md text-sm leading-6 text-gray-500">Connect Gmail separately from sign-in. You choose which Google account to use and approve read-only inbox access.</p>
 
-              <button
-                type="button"
-                onClick={connectGoogle}
-                disabled={isConnecting}
-                className="mt-8 flex h-12 w-full items-center justify-center gap-3 rounded-xl border border-gray-300 bg-white font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <FcGoogle size={22} />
-                {isConnecting ? "Connecting to Google..." : "Connect Gmail"}
-              </button>
+              {connectedEmail ? (
+                <div className="mt-8 space-y-3">
+                  <div className="flex items-center justify-between gap-4 rounded-xl border border-rose-100 bg-rose-50/40 p-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white shadow-sm"><FcGoogle size={22} /></span>
+                      <div className="min-w-0"><p className="text-xs font-medium uppercase tracking-wide text-gray-500">Connected Gmail</p><p className="truncate text-sm font-semibold text-gray-900">{connectedEmail}</p></div>
+                    </div>
+                    <button type="button" onClick={disconnectEmail} className="shrink-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50"><Unplug className="mr-1.5 inline h-4 w-4" />Disconnect</button>
+                  </div>
+                  <a href="/api/gmail/connect" className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white text-sm font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50"><Plus className="h-4 w-4" />Add another email</a>
+                </div>
+              ) : (
+                <a href="/api/gmail/connect" className="mt-8 flex h-12 w-full items-center justify-center gap-3 rounded-xl border border-gray-300 bg-white font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50"><FcGoogle size={22} />Connect Gmail</a>
+              )}
 
+              {connected && <p className="mt-3 text-sm text-emerald-700" role="status">Gmail connected. Your inbox is ready to review.</p>}
+              {!connectedEmail && isCheckingConnection && <p className="mt-3 text-sm text-gray-500">Checking connected accounts...</p>}
               {error && <p className="mt-3 text-sm text-destructive" role="alert">{error}</p>}
 
               <div className="mt-8 grid gap-3 sm:grid-cols-2">
