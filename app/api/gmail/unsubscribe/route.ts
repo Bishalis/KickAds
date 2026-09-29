@@ -5,14 +5,19 @@ import { sendOneClickUnsubscribe } from "@/lib/email/safe-fetch";
 import { isValidEmailAddress } from "@/lib/email/sender";
 import {
   countRecentActions,
+  countUnsubscribesThisMonth,
   finishUnsubscribeAction,
   getAuthedContext,
   getGmailConnection,
   getLatestAction,
+  getPlan,
   listSenderRules,
   recordUnsubscribeAction,
+  recordUnsubscribeUsage,
   startUnsubscribeAction,
+  type AuthedContext,
 } from "@/lib/email/store";
+import { planLimits } from "@/lib/plans";
 import { NextResponse } from "next/server";
 
 export const maxDuration = 30;
@@ -28,18 +33,26 @@ export async function POST(request: Request) {
   const context = await getAuthedContext();
   if (!context) return jsonError("Please sign in.", 401);
 
-  const body = await request.json().catch(() => null) as { key?: unknown; confirmed?: unknown; acknowledgeReview?: unknown } | null;
+  const body = await request.json().catch(() => null) as { accountId?: unknown; key?: unknown; confirmed?: unknown; acknowledgeReview?: unknown } | null;
+  const accountId = typeof body?.accountId === "string" ? body.accountId : null;
   const key = typeof body?.key === "string" && body.key.length <= 600 ? body.key : "";
   const address = key.split("|")[0];
   if (!isValidEmailAddress(address)) return jsonError("Choose a sender to unsubscribe from.", 400);
   if (body?.confirmed !== true) return jsonError("Explicit confirmation is required.", 400);
 
+  let connectionId: string | undefined;
   try {
     if (await countRecentActions(context, 10 * 60_000) >= maxActionsPer10Minutes) {
-      return jsonError("Too many unsubscribe attempts. Please wait a few minutes.", 429);
+      return jsonError("Too many unsubscribes in a short time. Please wait a few minutes.", 429);
     }
-    const connection = await getGmailConnection(context);
+    const plan = await getPlan(context);
+    const monthlyLimit = planLimits[plan].monthlyUnsubscribes;
+    if (monthlyLimit !== null && await countUnsubscribesThisMonth(context) >= monthlyLimit) {
+      return jsonError(`You've used all ${monthlyLimit} unsubscribes included in ${planLimits[plan].label} this month. Upgrade to Premium for unlimited unsubscribes.`, 403, { upgradeRequired: true });
+    }
+    const connection = await getGmailConnection(context, plan, accountId);
     if (!connection) return jsonError("Gmail is not connected.", 400, { gmailConnected: false });
+    connectionId = connection.id;
 
     // Re-derive the sender from Gmail right now; never trust a URL or classification from the browser.
     const gmail = createGmailClient(connection.refreshToken);
@@ -50,23 +63,25 @@ export async function POST(request: Request) {
     const decision = evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: body.acknowledgeReview === true });
     if (decision.outcome === "blocked") return jsonError(decision.reason, 409);
 
-    const latest = await getLatestAction(context, key);
+    const latest = await getLatestAction(context, connection.googleEmail, key);
     if (latest?.status === "success" && Date.parse(latest.createdAt) >= group.lastReceivedAt) {
       return NextResponse.json({ status: "success", actionId: latest.id, detail: "You already unsubscribed, and no new email from this sender has arrived since." });
     }
 
-    return NextResponse.json(await execute(context, group, decision));
+    return NextResponse.json(await execute(context, connection.googleEmail, group, decision));
   } catch (error) {
-    return handleRouteError(error, context, "unsubscribe");
+    return handleRouteError(error, context, "unsubscribe", connectionId);
   }
 }
 
 async function execute(
-  context: NonNullable<Awaited<ReturnType<typeof getAuthedContext>>>,
+  context: AuthedContext,
+  accountEmail: string,
   group: SenderGroup,
   decision: Exclude<ReturnType<typeof evaluateUnsubscribe>, { outcome: "blocked" }>,
 ) {
   const record = {
+    accountEmail,
     senderKey: group.key,
     senderAddress: group.address,
     senderDomain: group.domain,
@@ -87,6 +102,7 @@ async function execute(
       ? "This sender unsubscribes by email. Send the prepared message from your mail app."
       : "This sender needs you to finish on their website. Open the link, then mark it done in History.";
     const actionId = await recordUnsubscribeAction(context, record, { status: "manual_required", detail });
+    if (actionId) await recordUnsubscribeUsage(context, actionId);
     return { status: "manual_required", actionId, detail, manualUrl: decision.url, mailto: decision.mailto };
   }
 
@@ -102,6 +118,8 @@ async function execute(
         ? { status: "failed" as const, detail: `The sender rejected the request (HTTP ${result.status}). You can try their unsubscribe page instead.`, httpStatus: result.status }
         : { status: "failed" as const, detail: result.detail };
   await finishUnsubscribeAction(context, actionId, outcome);
+  // Only unsubscribes that went through (or were handed to you to finish) count toward the plan.
+  if (outcome.status !== "failed") await recordUnsubscribeUsage(context, actionId);
   return {
     status: outcome.status,
     actionId,

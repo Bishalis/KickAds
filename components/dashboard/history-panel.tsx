@@ -68,6 +68,7 @@ export function HistoryPanel() {
                   <td className="px-5 py-4">
                     <p className="font-medium text-gray-900">{action.displayName}</p>
                     <p className="text-xs text-gray-500">{action.senderAddress}</p>
+                    {action.accountEmail && <p className="mt-1 text-[11px] text-gray-400">In {action.accountEmail}</p>}
                   </td>
                   <td className="px-5 py-4 text-gray-700">{methodLabels[action.method]}</td>
                   <td className="px-5 py-4 text-gray-700">{formatDate(action.createdAt, true)}</td>

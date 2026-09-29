@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   buildSenderGroups,
   evaluateUnsubscribe,
+  finalizeGroups,
+  foldMessages,
   getScanStats,
   toSenderSummary,
   type ScanContext,
@@ -180,4 +182,20 @@ test("summaries sent to the browser carry no URLs or message IDs", () => {
   const serialized = JSON.stringify(summary);
   assert.doesNotMatch(serialized, /https:\/\//);
   assert.doesNotMatch(serialized, /"m\d+"/);
+});
+
+test("folding messages in batches gives the same result as all at once", () => {
+  const messages = [
+    message({ from: "hello@news.example.com", subject: "Weekly 1", headers: newsletterHeaders, daysAgo: 2 }),
+    message({ from: "hello@news.example.com", subject: "Weekly 2", headers: newsletterHeaders }),
+    message({ from: "billing@shop.example", subject: "Your invoice" }),
+    message({ from: "hello@news.example.com", subject: "Weekly 3", headers: newsletterHeaders, daysAgo: 9 }),
+  ];
+  const batched = foldMessages(foldMessages({}, messages.slice(0, 2)), messages.slice(2));
+  // Round-trip through JSON the way the encrypted scan cursor does between batches.
+  const restored = JSON.parse(JSON.stringify(batched)) as typeof batched;
+  assert.deepEqual(finalizeGroups(restored, emptyContext), buildSenderGroups(messages, emptyContext));
+  const newsletter = finalizeGroups(restored, emptyContext).find((group) => group.address === "hello@news.example.com");
+  assert.equal(newsletter?.emailCount, 3);
+  assert.deepEqual(newsletter?.sampleSubjects, ["Weekly 2", "Weekly 1", "Weekly 3"]);
 });

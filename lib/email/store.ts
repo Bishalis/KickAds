@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { ScanStats, SenderRule } from "./classifier.ts";
 import { decryptSecret, encryptSecret } from "./google-oauth.ts";
 import type { UnsubscribeMethod } from "./unsubscribe.ts";
+import { PlanLimitError, planLimits, startOfUtcMonth, type Plan, type PlanUsage } from "@/lib/plans";
 
 type Supabase = Awaited<ReturnType<typeof createClient>>;
 
@@ -15,51 +16,97 @@ export async function getAuthedContext(): Promise<AuthedContext | null> {
   return user ? { supabase, user } : null;
 }
 
-export type GmailConnection = {
+export type GmailAccount = {
+  id: string;
   googleEmail: string;
-  refreshToken: string;
   lastScanAt: string | null;
   lastScanStats: ScanStats | null;
+  /** Connected beyond what the current plan allows (e.g. after a downgrade); not usable. */
+  locked: boolean;
 };
 
-export async function getGmailConnection({ supabase, user }: AuthedContext): Promise<GmailConnection | null> {
+export type GmailConnection = GmailAccount & { refreshToken: string };
+
+export async function getPlan({ supabase, user }: AuthedContext): Promise<Plan> {
+  const { data, error } = await supabase.from("user_plans").select("plan").eq("user_id", user.id).maybeSingle();
+  if (error) throw new Error(`Could not load your plan: ${error.message}`);
+  return data?.plan === "premium" ? "premium" : "free";
+}
+
+/** Accounts in the order they were first connected; the oldest ones fit the plan first. */
+export async function listGmailAccounts({ supabase, user }: AuthedContext, plan: Plan): Promise<GmailAccount[]> {
   const { data, error } = await supabase
     .from("gmail_connections")
-    .select("google_email, encrypted_refresh_token, last_scan_at, last_scan_stats")
+    .select("id, google_email, last_scan_at, last_scan_stats")
     .eq("user_id", user.id)
-    .maybeSingle();
+    .order("connected_at", { ascending: true });
+  if (error) throw new Error(`Could not load Gmail connections: ${error.message}`);
+  return (data ?? []).map((row, index) => ({
+    id: row.id,
+    googleEmail: row.google_email,
+    lastScanAt: row.last_scan_at,
+    lastScanStats: row.last_scan_stats,
+    locked: index >= planLimits[plan].maxAccounts,
+  }));
+}
+
+/**
+ * The connection to use for a request: the requested account, or the first usable one.
+ * Returns null when nothing is connected; throws PlanLimitError for a locked account.
+ */
+export async function getGmailConnection(context: AuthedContext, plan: Plan, accountId?: string | null): Promise<GmailConnection | null> {
+  const accounts = await listGmailAccounts(context, plan);
+  const account = accountId ? accounts.find((item) => item.id === accountId) : accounts.find((item) => !item.locked);
+  if (!account) return null;
+  if (account.locked) throw new PlanLimitError(`Your ${planLimits[plan].label} plan includes ${planLimits[plan].maxAccounts} Gmail account${planLimits[plan].maxAccounts === 1 ? "" : "s"}. Upgrade to use ${account.googleEmail}.`);
+
+  const { data, error } = await context.supabase.from("gmail_connections").select("encrypted_refresh_token").eq("id", account.id).single();
   if (error) throw new Error(`Could not load the Gmail connection: ${error.message}`);
-  if (!data) return null;
   const refreshToken = decryptSecret(data.encrypted_refresh_token);
-  if (!refreshToken) return null;
-  return {
-    googleEmail: data.google_email,
-    refreshToken,
-    lastScanAt: data.last_scan_at,
-    lastScanStats: data.last_scan_stats,
-  };
+  return refreshToken ? { ...account, refreshToken } : null;
 }
 
 export async function saveGmailConnection({ supabase, user }: AuthedContext, connection: { googleEmail: string; refreshToken: string; scopes: string }) {
+  // connected_at is left to its insert default, so reconnecting keeps the account's place in line.
   const { error } = await supabase.from("gmail_connections").upsert({
     user_id: user.id,
     google_email: connection.googleEmail,
     encrypted_refresh_token: encryptSecret(connection.refreshToken),
     scopes: connection.scopes,
-    connected_at: new Date().toISOString(),
     last_scan_at: null,
     last_scan_stats: null,
-  });
+  }, { onConflict: "user_id,google_email" });
   if (error) throw new Error(`Could not save the Gmail connection: ${error.message}`);
 }
 
-export async function deleteGmailConnection({ supabase, user }: AuthedContext) {
-  const { error } = await supabase.from("gmail_connections").delete().eq("user_id", user.id);
+export async function deleteGmailConnection({ supabase }: AuthedContext, accountId: string) {
+  const { error } = await supabase.from("gmail_connections").delete().eq("id", accountId);
   if (error) throw new Error(`Could not remove the Gmail connection: ${error.message}`);
 }
 
-export async function saveScanStats({ supabase, user }: AuthedContext, stats: ScanStats) {
-  await supabase.from("gmail_connections").update({ last_scan_at: new Date().toISOString(), last_scan_stats: stats }).eq("user_id", user.id);
+export async function saveScanStats({ supabase }: AuthedContext, accountId: string, stats: ScanStats) {
+  await supabase.from("gmail_connections").update({ last_scan_at: new Date().toISOString(), last_scan_stats: stats }).eq("id", accountId);
+}
+
+export async function countUnsubscribesThisMonth({ supabase }: AuthedContext) {
+  const { count, error } = await supabase
+    .from("unsubscribe_usage")
+    .select("id", { count: "exact", head: true })
+    .gte("created_at", startOfUtcMonth().toISOString());
+  if (error) throw new Error(`Could not load your usage: ${error.message}`);
+  return count ?? 0;
+}
+
+/** Counts one unsubscribe toward the monthly plan limit. */
+export async function recordUnsubscribeUsage({ supabase, user }: AuthedContext, actionId: string) {
+  const { error } = await supabase.from("unsubscribe_usage").insert({ user_id: user.id, action_id: actionId });
+  if (error) throw new Error(`Could not record usage: ${error.message}`);
+}
+
+export async function getPlanUsage(context: AuthedContext): Promise<PlanUsage> {
+  const plan = await getPlan(context);
+  const [unsubscribesThisMonth, accounts] = await Promise.all([countUnsubscribesThisMonth(context), listGmailAccounts(context, plan)]);
+  return { plan, limits: planLimits[plan], unsubscribesThisMonth, accountsConnected: accounts.length };
 }
 
 export async function listSenderRules({ supabase }: AuthedContext): Promise<SenderRule[]> {
@@ -85,6 +132,7 @@ export type UnsubscribeStatus = "pending" | "success" | "failed" | "manual_requi
 
 export type UnsubscribeAction = {
   id: string;
+  accountEmail: string | null;
   senderKey: string;
   senderAddress: string;
   senderDomain: string;
@@ -96,11 +144,12 @@ export type UnsubscribeAction = {
   updatedAt: string;
 };
 
-const actionColumns = "id, sender_key, sender_address, sender_domain, display_name, method, status, detail, created_at, updated_at";
+const actionColumns = "id, account_email, sender_key, sender_address, sender_domain, display_name, method, status, detail, created_at, updated_at";
 
 function toAction(row: Record<string, string>): UnsubscribeAction {
   return {
     id: row.id,
+    accountEmail: row.account_email,
     senderKey: row.sender_key,
     senderAddress: row.sender_address,
     senderDomain: row.sender_domain,
@@ -127,23 +176,25 @@ export async function countRecentActions({ supabase }: AuthedContext, sinceMs: n
   return count ?? 0;
 }
 
-/** Most recent attempt per sender key, so the scan can show what already happened. */
-export async function getLatestActionsBySender(context: AuthedContext) {
+/** Most recent attempt per sender key for one Gmail account, so the scan can show what already happened. */
+export async function getLatestActionsBySender({ supabase }: AuthedContext, accountEmail: string) {
+  const { data, error } = await supabase.from("unsubscribe_actions").select(actionColumns).eq("account_email", accountEmail).order("created_at", { ascending: false }).limit(500);
+  if (error) throw new Error(`Could not load unsubscribe history: ${error.message}`);
   const latest = new Map<string, Pick<UnsubscribeAction, "id" | "status" | "createdAt">>();
-  for (const action of await listUnsubscribeActions(context, 500)) {
+  for (const action of (data ?? []).map(toAction)) {
     if (!latest.has(action.senderKey)) latest.set(action.senderKey, { id: action.id, status: action.status, createdAt: action.createdAt });
   }
   return latest;
 }
 
-/** Latest attempt for a sender, used to avoid repeating a request that already worked. */
-export async function getLatestAction({ supabase }: AuthedContext, senderKey: string) {
-  const { data } = await supabase.from("unsubscribe_actions").select(actionColumns).eq("sender_key", senderKey).order("created_at", { ascending: false }).limit(1).maybeSingle();
+/** Latest attempt for a sender in one Gmail account, used to avoid repeating a request that already worked. */
+export async function getLatestAction({ supabase }: AuthedContext, accountEmail: string, senderKey: string) {
+  const { data } = await supabase.from("unsubscribe_actions").select(actionColumns).eq("account_email", accountEmail).eq("sender_key", senderKey).order("created_at", { ascending: false }).limit(1).maybeSingle();
   return data ? toAction(data) : null;
 }
 
 /** Inserts a pending attempt. Returns null when another attempt for this sender is already in flight. */
-export async function startUnsubscribeAction({ supabase, user }: AuthedContext, action: { senderKey: string; senderAddress: string; senderDomain: string; displayName: string; listId: string | null; method: UnsubscribeMethod; targetHost: string | null }) {
+export async function startUnsubscribeAction({ supabase, user }: AuthedContext, action: { accountEmail: string; senderKey: string; senderAddress: string; senderDomain: string; displayName: string; listId: string | null; method: UnsubscribeMethod; targetHost: string | null }) {
   // A pending row older than two minutes belongs to a request that crashed; close it out.
   await supabase.from("unsubscribe_actions")
     .update({ status: "failed", detail: "The request did not finish.", updated_at: new Date().toISOString() })
@@ -151,6 +202,7 @@ export async function startUnsubscribeAction({ supabase, user }: AuthedContext, 
 
   const { data, error } = await supabase.from("unsubscribe_actions").insert({
     user_id: user.id,
+    account_email: action.accountEmail,
     sender_key: action.senderKey,
     sender_address: action.senderAddress,
     sender_domain: action.senderDomain,

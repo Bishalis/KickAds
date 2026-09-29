@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react";
 import { CircleHelp, Clock3, Inbox, LayoutDashboard, MailPlus, Menu, ShieldCheck, X } from "lucide-react";
 import { logout } from "@/app/actions/auth";
 import { Button } from "@/components/ui/button";
+import { PlanCard } from "./plan-card";
 import { clearScanSnapshot } from "./scan-cache";
 
 const workspaceItems = [
@@ -37,7 +38,7 @@ function NavLink({ item, active, onClick }: { item: (typeof workspaceItems)[numb
 function Sidebar({ onClose }: { onClose?: () => void }) {
   const pathname = usePathname();
   return (
-    <aside className="flex h-screen w-64 shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-white px-4 py-5 lg:fixed lg:inset-y-0 lg:left-0 lg:z-40">
+    <aside className="flex h-screen w-64 shrink-0 flex-col overflow-y-auto border-r border-gray-200 bg-white px-4 py-5 lg:fixed lg:inset-y-0 lg:left-0 lg:z-40">
       <div className="flex items-center justify-between px-2">
         <Link href="/" className="flex items-center gap-2" onClick={onClose}>
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-white shadow-sm shadow-purple-200">
@@ -62,9 +63,12 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
         {manageItems.map((item) => <NavLink key={item.href} item={item} active={pathname === item.href} onClick={onClose} />)}
       </nav>
 
-      <form action={logout} onSubmit={clearScanSnapshot} className="mt-auto px-2">
-        <Button type="submit" variant="outline" className="w-full border-gray-200 text-gray-600 hover:text-gray-950">Log out</Button>
-      </form>
+      <div className="mt-auto space-y-3 pt-6">
+        <PlanCard onNavigate={onClose} />
+        <form action={logout} onSubmit={clearScanSnapshot} className="px-2">
+          <Button type="submit" variant="outline" className="w-full border-gray-200 text-gray-600 hover:text-gray-950">Log out</Button>
+        </form>
+      </div>
     </aside>
   );
 }
@@ -72,7 +76,7 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
 export function AppShell({ email, children }: { email: string; children: ReactNode }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const pathname = usePathname();
-  const title = [...workspaceItems, ...manageItems].find((item) => item.href === pathname)?.label ?? "Workspace";
+  const title = [...workspaceItems, ...manageItems, { label: "Plans", href: "/dashboard/upgrade" }].find((item) => item.href === pathname)?.label ?? "Workspace";
 
   return (
     <div className="min-h-screen bg-[#f8f8fb] text-gray-950">

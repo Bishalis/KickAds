@@ -22,7 +22,7 @@ export default function HelpPage() {
             "Subscriptions have clear mailing-list signals, such as unsubscribe headers or Gmail's Promotions tab, from a sender Gmail could verify.",
             "Protected senders look important: people you email, starred mail, personal addresses, or subjects about security, payments, orders, work, school, government, or health.",
             "Needs review means the signals conflict or aren't strong enough. When in doubt, KickAds chooses review over unsubscribe.",
-            "Only senders who emailed you in the last 6 months are shown. Very large inboxes are limited to the most recent emails.",
+            "Only senders who emailed you in the last 6 months are shown. Freemium scans your newest 1,500 emails; Premium scans all of them.",
           ],
         },
         {
@@ -41,6 +41,15 @@ export default function HelpPage() {
             "Needs your action: finish on the sender's page or send the prepared email, then mark it done in History.",
             "Failed: the sender rejected or didn't answer the request. You can try their unsubscribe page instead.",
             "No unsubscribe method: no unsubscribe option was found. Consider a Gmail filter instead.",
+          ],
+        },
+        {
+          title: "Plans",
+          items: [
+            "Freemium: 10 unsubscribes per month (resets on the 1st, UTC), your newest 1,500 emails per scan, and 1 Gmail account.",
+            "Premium: unlimited unsubscribes, every email from the last 6 months, and up to 3 Gmail accounts.",
+            "An unsubscribe counts toward the limit when it succeeds or when you're given the sender's page to finish it. Failed attempts don't count.",
+            <>Compare plans on the <Link href="/dashboard/upgrade" className="font-medium text-primary hover:underline">Plans</Link> page.</>,
           ],
         },
         {

@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Ban, ChevronRight, EyeOff, Filter, Loader2, RefreshCw, ShieldCheck, ShieldOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { Classification, ScanStats, SenderRule } from "@/lib/email/classifier";
-import { clearScanSnapshot, getScanSnapshot, setScanSnapshot, type CachedSender as Sender, type UnsubscribeResult } from "./scan-cache";
+import type { Classification, SenderRule } from "@/lib/email/classifier";
+import type { GmailAccount } from "@/lib/email/store";
+import { planLimits, planUsageChangedEvent, type Plan } from "@/lib/plans";
+import { getScanSnapshot, setScanSnapshot, type AccountScan, type CachedSender as Sender, type UnsubscribeResult } from "./scan-cache";
 import { formatDate, methodLabels, statusLabels } from "./status";
 
 type Tab = Classification | "ignored";
@@ -35,47 +37,86 @@ function tabOf(sender: Sender): Tab {
 }
 
 export function UnsubscriberWorkspace() {
-  // Reuse the last scan when coming back to this page; only Rescan fetches again.
+  // Reuse earlier scans when coming back to this page; only Rescan fetches again.
   const [cached] = useState(getScanSnapshot);
-  const [gmail, setGmail] = useState<{ checked: boolean; email: string | null }>(cached ? { checked: true, email: cached.gmailEmail } : { checked: false, email: null });
-  const [senders, setSenders] = useState<Sender[]>(cached?.senders ?? []);
-  const [rules, setRules] = useState<SenderRule[]>(cached?.rules ?? []);
-  const [stats, setStats] = useState<ScanStats | null>(cached?.stats ?? null);
-  const [hasScanned, setHasScanned] = useState(Boolean(cached));
-  const [isScanning, setIsScanning] = useState(false);
-  const [error, setError] = useState("");
+  const [checked, setChecked] = useState(Boolean(cached));
+  const [plan, setPlan] = useState<Plan>(cached?.plan ?? "free");
+  const [accounts, setAccounts] = useState<GmailAccount[]>(cached?.accounts ?? []);
+  const [selectedId, setSelectedId] = useState<string | null>(cached?.selectedAccountId ?? null);
+  const [scans, setScans] = useState<Record<string, AccountScan>>(cached?.scans ?? {});
+  const [scanning, setScanning] = useState<{ accountId: string; scanned: number } | null>(null);
+  const [error, setError] = useState<{ message: string; upgrade?: boolean } | null>(null);
   const [tab, setTab] = useState<Tab>("subscription");
   const [filter, setFilter] = useState("");
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [results, setResults] = useState<Record<string, UnsubscribeResult>>(cached?.results ?? {});
+  const abortRef = useRef<AbortController | null>(null);
+
+  const selected = accounts.find((account) => account.id === selectedId) ?? null;
+  const current = selectedId ? scans[selectedId] : undefined;
+  const senders = useMemo(() => current?.senders ?? [], [current]);
+  const rules = current?.rules ?? [];
+  const stats = current?.stats ?? null;
+  const results = current?.results ?? {};
+  const isScanning = scanning?.accountId === selectedId;
 
   useEffect(() => {
-    if (hasScanned && gmail.email) setScanSnapshot({ gmailEmail: gmail.email, senders, rules, stats, results });
-  }, [hasScanned, gmail.email, senders, rules, stats, results]);
+    if (checked) setScanSnapshot({ plan, accounts, selectedAccountId: selectedId, scans });
+  }, [checked, plan, accounts, selectedId, scans]);
 
-  async function scan() {
-    setIsScanning(true);
-    setError("");
+  // Stop an in-flight scan when leaving the page, so it doesn't keep using Gmail quota.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  function updateScan(accountId: string, update: (scan: AccountScan) => AccountScan) {
+    setScans((all) => (all[accountId] ? { ...all, [accountId]: update(all[accountId]) } : all));
+  }
+
+  function forgetAccount(accountId: string) {
+    setAccounts((all) => all.filter((account) => account.id !== accountId));
+    setScans((all) => Object.fromEntries(Object.entries(all).filter(([id]) => id !== accountId)));
+    setSelectedId((id) => (id === accountId ? null : id));
+  }
+
+  /** Runs a scan batch by batch; each request returns a cursor for the next one. */
+  async function scan(accountId: string) {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setScanning({ accountId, scanned: 0 });
+    setError(null);
     try {
-      const response = await fetch("/api/gmail");
-      const data = await response.json();
-      if (data.gmailConnected === false) {
-        clearScanSnapshot();
-        setGmail({ checked: true, email: null });
+      let cursor: string | undefined;
+      for (;;) {
+        const response = await fetch("/api/gmail", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountId, cursor }),
+          signal: controller.signal,
+        });
+        const data = await response.json();
+        if (data.gmailConnected === false) forgetAccount(accountId);
+        if (!response.ok) {
+          setError({ message: data.error ?? "Could not scan your inbox.", upgrade: data.upgradeRequired === true });
+          return;
+        }
+        if (!data.done) {
+          cursor = data.cursor;
+          setScanning({ accountId, scanned: data.scanned });
+          continue;
+        }
+        setScans((all) => ({ ...all, [accountId]: { senders: data.senders, rules: data.rules, stats: data.stats, results: all[accountId]?.results ?? {} } }));
+        setPage(1);
+        return;
       }
-      if (!response.ok) throw new Error(data.error ?? "Could not scan your inbox.");
-      setSenders(data.senders);
-      setRules(data.rules);
-      setStats(data.stats);
-      setHasScanned(true);
-      setPage(1);
     } catch (scanError) {
-      setError(scanError instanceof Error ? scanError.message : "Could not scan your inbox.");
+      if (!controller.signal.aborted) setError({ message: scanError instanceof Error ? scanError.message : "Could not scan your inbox." });
     } finally {
-      setIsScanning(false);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setScanning(null);
+      }
     }
   }
 
@@ -86,17 +127,28 @@ export function UnsubscriberWorkspace() {
         const response = await fetch("/api/gmail/status");
         const data = await response.json();
         if (!response.ok) throw new Error(data.error ?? "Could not check the Gmail connection.");
-        setGmail({ checked: true, email: data.gmailConnected ? data.email : null });
-        if (data.gmailConnected) await scan();
+        const firstUsable = (data.accounts as GmailAccount[]).find((account) => !account.locked);
+        setPlan(data.plan);
+        setAccounts(data.accounts);
+        setSelectedId(firstUsable?.id ?? null);
+        setChecked(true);
+        if (firstUsable) await scan(firstUsable.id);
       } catch (statusError) {
-        setGmail({ checked: true, email: null });
-        setError(statusError instanceof Error ? statusError.message : "Could not check the Gmail connection.");
+        setChecked(true);
+        setError({ message: statusError instanceof Error ? statusError.message : "Could not check the Gmail connection." });
       }
     }
     void start();
     // Runs once per visit; `cached` is fixed for the component's lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function selectAccount(accountId: string) {
+    setSelectedId(accountId);
+    setPage(1);
+    setExpanded(null);
+    if (!scans[accountId]) void scan(accountId);
+  }
 
   const counts = useMemo(() => {
     const result: Record<Tab, number> = { subscription: 0, review: 0, protected: 0, ignored: 0 };
@@ -111,10 +163,12 @@ export function UnsubscriberWorkspace() {
   const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
   const pageItems = visible.slice((page - 1) * pageSize, page * pageSize);
 
-  /** Applies a rule change locally; the server re-checks everything before any unsubscribe. */
+  /**
+   * Applies a rule change locally to every account's results (rules are shared across
+   * accounts); the server re-checks everything before any unsubscribe.
+   */
   function applyRules(nextRules: SenderRule[]) {
-    setRules(nextRules);
-    setSenders((current) => current.map((sender) => {
+    const apply = (sender: Sender): Sender => {
       const protect = nextRules.find((rule) => rule.kind === "protect" && ruleMatches(rule, sender));
       const ignore = nextRules.find((rule) => rule.kind === "ignore" && ruleMatches(rule, sender));
       if (protect) {
@@ -125,12 +179,13 @@ export function UnsubscriberWorkspace() {
         return { ...sender, classification: "review", protectedBy: null, ignored: Boolean(ignore), reasons: ["Protection removed. Rescan to classify this sender again."] };
       }
       return { ...sender, ignored: Boolean(ignore) };
-    }));
+    };
+    setScans((all) => Object.fromEntries(Object.entries(all).map(([id, scan]) => [id, { ...scan, rules: nextRules, senders: scan.senders.map(apply) }])));
   }
 
   async function changeRule(sender: Sender, kind: SenderRule["kind"], matchType: SenderRule["matchType"], enable: boolean) {
     setBusy(sender.key);
-    setError("");
+    setError(null);
     try {
       const value = matchType === "address" ? sender.address : sender.domain;
       const existing = rules.find((rule) => rule.kind === kind && rule.matchType === matchType && ruleMatches(rule, sender));
@@ -141,40 +196,42 @@ export function UnsubscriberWorkspace() {
       if (!response.ok) throw new Error(data.error ?? "Could not update the sender rule.");
       applyRules(data.rules);
     } catch (ruleError) {
-      setError(ruleError instanceof Error ? ruleError.message : "Could not update the sender rule.");
+      setError({ message: ruleError instanceof Error ? ruleError.message : "Could not update the sender rule." });
     } finally {
       setBusy(null);
     }
   }
 
   async function unsubscribe(sender: Sender) {
+    if (!selectedId) return;
+    const accountId = selectedId;
     setBusy(sender.key);
     setConfirming(null);
+    let result: UnsubscribeResult;
     try {
       const response = await fetch("/api/gmail/unsubscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: sender.key, confirmed: true, acknowledgeReview: sender.classification === "review" }),
+        body: JSON.stringify({ accountId, key: sender.key, confirmed: true, acknowledgeReview: sender.classification === "review" }),
       });
       const data = await response.json();
-      if (data.gmailConnected === false) {
-        clearScanSnapshot();
-        setGmail({ checked: true, email: null });
-      }
-      const result: UnsubscribeResult = response.ok
+      if (data.gmailConnected === false) forgetAccount(accountId);
+      result = response.ok
         ? { status: data.status, detail: data.detail, manualUrl: data.manualUrl, mailto: data.mailto }
-        : { status: "failed", detail: data.error ?? "The unsubscribe request failed." };
-      setResults((current) => ({ ...current, [sender.key]: result }));
+        : { status: "failed", detail: data.error ?? "The unsubscribe request failed.", upgrade: data.upgradeRequired === true };
+      if (response.ok) window.dispatchEvent(new Event(planUsageChangedEvent));
     } catch {
-      setResults((current) => ({ ...current, [sender.key]: { status: "failed", detail: "The unsubscribe request failed. Check your connection and try again." } }));
-    } finally {
-      setBusy(null);
+      result = { status: "failed", detail: "The unsubscribe request failed. Check your connection and try again." };
     }
+    updateScan(accountId, (scan) => ({ ...scan, results: { ...scan.results, [sender.key]: result } }));
+    setBusy(null);
   }
 
-  if (!gmail.checked) {
+  if (!checked) {
     return <p className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="h-4 w-4 animate-spin" /> Checking your Gmail connection...</p>;
   }
+
+  const usableAccounts = accounts.filter((account) => !account.locked);
 
   return (
     <>
@@ -185,16 +242,38 @@ export function UnsubscriberWorkspace() {
             Senders who emailed you in the last 6 months, grouped by address. Nothing is unsubscribed unless you choose it.
           </p>
         </div>
-        {gmail.email && (
-          <Button type="button" variant="outline" onClick={scan} disabled={isScanning} className="h-10 gap-2 rounded-lg">
-            <RefreshCw className={`h-4 w-4 ${isScanning ? "animate-spin" : ""}`} /> {isScanning ? "Scanning..." : "Rescan"}
-          </Button>
+        {selected && (
+          <div className="flex flex-wrap items-center gap-2">
+            {accounts.length > 1 && (
+              <select
+                value={selected.id}
+                onChange={(event) => selectAccount(event.target.value)}
+                disabled={Boolean(scanning)}
+                aria-label="Gmail account"
+                className="h-10 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 outline-none focus:border-primary"
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id} disabled={account.locked}>
+                    {account.googleEmail}{account.locked ? " (Premium only)" : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+            <Button type="button" variant="outline" onClick={() => scan(selected.id)} disabled={Boolean(scanning)} className="h-10 gap-2 rounded-lg">
+              <RefreshCw className={`h-4 w-4 ${isScanning ? "animate-spin" : ""}`} /> {isScanning ? "Scanning..." : "Rescan"}
+            </Button>
+          </div>
         )}
       </div>
 
-      {error && <p className="mt-6 rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-700" role="alert">{error}</p>}
+      {error && (
+        <p className="mt-6 rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-700" role="alert">
+          {error.message}
+          {error.upgrade && <> <Link href="/dashboard/upgrade" className="font-semibold underline">See plans</Link></>}
+        </p>
+      )}
 
-      {!gmail.email ? (
+      {!usableAccounts.length ? (
         <section className="mt-8 rounded-2xl border border-purple-200 bg-purple-50 p-6">
           <h2 className="text-lg font-semibold text-gray-950">Connect your Gmail</h2>
           <p className="mt-1 text-sm text-gray-600">Signing in doesn&apos;t give us access to your email. Connect Gmail separately to find subscriptions.</p>
@@ -225,12 +304,22 @@ export function UnsubscriberWorkspace() {
               />
             </label>
             <span className="text-sm text-gray-500">
-              {stats ? `${stats.analyzed} emails from ${stats.senders} senders${stats.capped ? " (most recent only)" : ""} · ${gmail.email}` : gmail.email}
+              {stats ? `${stats.analyzed.toLocaleString("en")} emails from ${stats.senders.toLocaleString("en")} senders · ${selected?.googleEmail}` : selected?.googleEmail}
             </span>
           </div>
 
-          {isScanning && !senders.length && (
-            <p className="flex items-center justify-center gap-2 p-12 text-sm text-gray-500"><Loader2 className="h-4 w-4 animate-spin" /> Scanning your inbox. Large mailboxes can take up to a minute.</p>
+          {stats?.capped && plan === "free" && (
+            <p className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Freemium scans your newest {planLimits.free.maxScanMessages?.toLocaleString("en")} emails, so older senders may be missing.{" "}
+              <Link href="/dashboard/upgrade" className="font-semibold underline">Upgrade to Premium</Link> to scan every email from the last 6 months.
+            </p>
+          )}
+
+          {isScanning && (
+            <p className="flex items-center justify-center gap-2 border-b border-gray-100 p-6 text-sm text-gray-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {scanning.scanned ? `Scanning... ${scanning.scanned.toLocaleString("en")} emails so far` : "Scanning your inbox..."}
+            </p>
           )}
           {!isScanning && !pageItems.length && <p className="p-12 text-center text-sm text-gray-500">{tabs.find((item) => item.id === tab)?.empty}</p>}
 
@@ -243,7 +332,7 @@ export function UnsubscriberWorkspace() {
                 confirming={confirming === sender.key}
                 busy={busy === sender.key}
                 result={results[sender.key]}
-                onToggle={() => setExpanded((current) => (current === sender.key ? null : sender.key))}
+                onToggle={() => setExpanded((open) => (open === sender.key ? null : sender.key))}
                 onStartUnsubscribe={() => setConfirming(sender.key)}
                 onCancelUnsubscribe={() => setConfirming(null)}
                 onUnsubscribe={() => unsubscribe(sender)}
@@ -349,6 +438,7 @@ function SenderRow({ sender, expanded, confirming, busy, result, onToggle, onSta
           {result.mailto && (
             <a href={result.mailto} className="mt-2 inline-block font-semibold underline">Open the unsubscribe email in your mail app</a>
           )}
+          {result.upgrade && <Link href="/dashboard/upgrade" className="mt-2 inline-block font-semibold underline">See plans</Link>}
           {(result.manualUrl || result.mailto) && <p className="mt-2 text-xs">When you&apos;re done, mark it as finished in <Link href="/dashboard/history" className="underline">History</Link>.</p>}
         </div>
       )}

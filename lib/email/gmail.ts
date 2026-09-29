@@ -10,9 +10,11 @@ type Gmail = gmail_v1.Gmail;
 // unsubscribed, so it isn't worth showing. Scanning this window drops exactly those senders.
 const activeSenderWindowMonths = 6;
 const scanQuery = `newer_than:${activeSenderWindowMonths}m -in:sent -in:chats -in:drafts`;
-const maxScanMessages = 1500;
 const maxSentMessages = 200;
-const maxBodyLookups = 40;
+/** Senders without an unsubscribe header whose newest email body is checked for a link. */
+export const maxBodyLookups = 40;
+/** Emails analyzed per scan request; keeps each request well under the 60s time limit. */
+export const scanBatchSize = 1000;
 const concurrency = 8;
 // Gmail allows 250 quota units per user per second and list/get cost 5 units each (50/s).
 // Starting at most one request every 25ms (40/s) stays under that with headroom.
@@ -110,15 +112,15 @@ export function createGmailClient(refreshToken: string): Gmail {
   return google.gmail({ version: "v1", auth: createAuthorizedClient(refreshToken) });
 }
 
-async function listMessageIds(gmail: Gmail, q: string, limit: number) {
+async function listMessageIds(gmail: Gmail, q: string, limit: number, startPageToken?: string) {
   const ids: string[] = [];
-  let pageToken: string | undefined;
+  let pageToken = startPageToken;
   do {
     const { data } = await call(gmail, () => gmail.users.messages.list({ userId: "me", q, pageToken, maxResults: Math.min(500, limit - ids.length) }));
     ids.push(...(data.messages ?? []).flatMap((message) => (message.id ? [message.id] : [])));
     pageToken = data.nextPageToken ?? undefined;
   } while (pageToken && ids.length < limit);
-  return { ids, capped: Boolean(pageToken) };
+  return { ids, nextPageToken: pageToken };
 }
 
 async function getMetadata(gmail: Gmail, id: string, headers: string[]): Promise<ScannedMessage | null> {
@@ -190,12 +192,26 @@ async function getMetadataBatch(gmail: Gmail, ids: string[], headers: string[]) 
   return results.filter((message): message is ScannedMessage => message !== null);
 }
 
-/** Received mail from active senders (last 6 months, excluding Sent/Chats/Drafts), headers only. */
-export async function scanMailbox(gmail: Gmail) {
-  const { ids, capped } = await listMessageIds(gmail, scanQuery, maxScanMessages);
-  const messages = await getMetadataBatch(gmail, ids, metadataHeaders);
-  await addBodyUnsubscribeLinks(gmail, messages);
-  return { messages, capped };
+/**
+ * One batch of received mail from active senders (last 6 months, excluding Sent/Chats/
+ * Drafts), headers only. Pass the returned page token to continue with the next batch.
+ */
+export async function scanMailboxBatch(gmail: Gmail, limit: number, pageToken?: string) {
+  const { ids, nextPageToken } = await listMessageIds(gmail, scanQuery, limit, pageToken);
+  return { messages: await getMetadataBatch(gmail, ids, metadataHeaders), listed: ids.length, nextPageToken };
+}
+
+/** Looks for body unsubscribe links in the given messages; bodies are discarded right away. */
+export async function findBodyUnsubscribeUrls(gmail: Gmail, messageIds: string[]) {
+  const urls = new Map<string, string>();
+  await mapConcurrent(messageIds.slice(0, maxBodyLookups), async (id) => {
+    const url = await findBodyUnsubscribeUrl(gmail, id).catch((error) => {
+      if (error instanceof GmailAccessError) throw error;
+      return undefined;
+    });
+    if (url) urls.set(id, url);
+  });
+  return urls;
 }
 
 /** Addresses the user recently wrote to; a strong sign a sender matters. */

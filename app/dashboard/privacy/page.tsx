@@ -25,11 +25,13 @@ export default function PrivacyPage() {
         {
           title: "What we store",
           items: [
-            "Your Gmail address and an encrypted Google access token, so scans work without reconnecting.",
+            "The address and an encrypted Google access token for each Gmail account you connect, so scans work without reconnecting.",
+            "Your plan, and a count of the unsubscribes you've used this month.",
             "The totals from your last scan (emails analyzed, subscriptions, protected, needs review).",
             "The senders and domains you protect or ignore.",
             "Your unsubscribe history: sender, method, time, and result.",
             "We don't store email bodies, subjects, or lists of your messages. Scan results stay in your open browser tab and disappear when you close or refresh it.",
+            "While a large scan runs, its progress travels between your browser and our server as an encrypted token that only our server can read. It expires after 20 minutes.",
           ],
         },
         {

@@ -1,7 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { createGmailClient, getGmailProfileEmail } from "@/lib/email/gmail";
 import { createGoogleOAuthClient, gmailReadonlyScope, gmailStateCookie, revokeGoogleGrant } from "@/lib/email/google-oauth";
-import { getAuthedContext, saveGmailConnection } from "@/lib/email/store";
+import { getAuthedContext, getPlan, listGmailAccounts, saveGmailConnection } from "@/lib/email/store";
+import { planLimits } from "@/lib/plans";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -45,6 +46,14 @@ export async function GET(request: Request) {
 
     const googleEmail = await getGmailProfileEmail(createGmailClient(refreshToken));
     if (!googleEmail) throw new Error("Gmail profile had no email address.");
+
+    // Reconnecting an existing account is always allowed; adding one must fit the plan.
+    const plan = await getPlan(context);
+    const accounts = await listGmailAccounts(context, plan);
+    if (!accounts.some((account) => account.googleEmail === googleEmail) && accounts.length >= planLimits[plan].maxAccounts) {
+      await revokeGoogleGrant(refreshToken).catch(() => undefined);
+      return fail("limit");
+    }
     await saveGmailConnection(context, { googleEmail, refreshToken, scopes: scopes.join(" ") });
   } catch (error) {
     console.error("[gmail callback] failed:", error instanceof Error ? error.message : "unknown error");
