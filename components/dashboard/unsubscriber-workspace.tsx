@@ -4,13 +4,11 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Ban, ChevronRight, EyeOff, Filter, Loader2, RefreshCw, ShieldCheck, ShieldOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { Classification, ScanStats, SenderRule, SenderSummary } from "@/lib/email/classifier";
-import type { UnsubscribeStatus } from "@/lib/email/store";
+import type { Classification, ScanStats, SenderRule } from "@/lib/email/classifier";
+import { clearScanSnapshot, getScanSnapshot, setScanSnapshot, type CachedSender as Sender, type UnsubscribeResult } from "./scan-cache";
 import { formatDate, methodLabels, statusLabels } from "./status";
 
-type Sender = SenderSummary & { lastAction: { id: string; status: UnsubscribeStatus; createdAt: string } | null };
 type Tab = Classification | "ignored";
-type UnsubscribeResult = { status: UnsubscribeStatus; detail: string; manualUrl?: string; mailto?: string };
 
 const tabs: Array<{ id: Tab; label: string; empty: string }> = [
   { id: "subscription", label: "Subscriptions", empty: "No subscriptions found in recent email." },
@@ -37,10 +35,13 @@ function tabOf(sender: Sender): Tab {
 }
 
 export function UnsubscriberWorkspace() {
-  const [gmail, setGmail] = useState<{ checked: boolean; email: string | null }>({ checked: false, email: null });
-  const [senders, setSenders] = useState<Sender[]>([]);
-  const [rules, setRules] = useState<SenderRule[]>([]);
-  const [stats, setStats] = useState<ScanStats | null>(null);
+  // Reuse the last scan when coming back to this page; only Rescan fetches again.
+  const [cached] = useState(getScanSnapshot);
+  const [gmail, setGmail] = useState<{ checked: boolean; email: string | null }>(cached ? { checked: true, email: cached.gmailEmail } : { checked: false, email: null });
+  const [senders, setSenders] = useState<Sender[]>(cached?.senders ?? []);
+  const [rules, setRules] = useState<SenderRule[]>(cached?.rules ?? []);
+  const [stats, setStats] = useState<ScanStats | null>(cached?.stats ?? null);
+  const [hasScanned, setHasScanned] = useState(Boolean(cached));
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("subscription");
@@ -49,7 +50,11 @@ export function UnsubscriberWorkspace() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [results, setResults] = useState<Record<string, UnsubscribeResult>>({});
+  const [results, setResults] = useState<Record<string, UnsubscribeResult>>(cached?.results ?? {});
+
+  useEffect(() => {
+    if (hasScanned && gmail.email) setScanSnapshot({ gmailEmail: gmail.email, senders, rules, stats, results });
+  }, [hasScanned, gmail.email, senders, rules, stats, results]);
 
   async function scan() {
     setIsScanning(true);
@@ -57,11 +62,15 @@ export function UnsubscriberWorkspace() {
     try {
       const response = await fetch("/api/gmail");
       const data = await response.json();
-      if (data.gmailConnected === false) setGmail({ checked: true, email: null });
+      if (data.gmailConnected === false) {
+        clearScanSnapshot();
+        setGmail({ checked: true, email: null });
+      }
       if (!response.ok) throw new Error(data.error ?? "Could not scan your inbox.");
       setSenders(data.senders);
       setRules(data.rules);
       setStats(data.stats);
+      setHasScanned(true);
       setPage(1);
     } catch (scanError) {
       setError(scanError instanceof Error ? scanError.message : "Could not scan your inbox.");
@@ -71,6 +80,7 @@ export function UnsubscriberWorkspace() {
   }
 
   useEffect(() => {
+    if (cached) return;
     async function start() {
       try {
         const response = await fetch("/api/gmail/status");
@@ -84,6 +94,8 @@ export function UnsubscriberWorkspace() {
       }
     }
     void start();
+    // Runs once per visit; `cached` is fixed for the component's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const counts = useMemo(() => {
@@ -145,7 +157,10 @@ export function UnsubscriberWorkspace() {
         body: JSON.stringify({ key: sender.key, confirmed: true, acknowledgeReview: sender.classification === "review" }),
       });
       const data = await response.json();
-      if (data.gmailConnected === false) setGmail({ checked: true, email: null });
+      if (data.gmailConnected === false) {
+        clearScanSnapshot();
+        setGmail({ checked: true, email: null });
+      }
       const result: UnsubscribeResult = response.ok
         ? { status: data.status, detail: data.detail, manualUrl: data.manualUrl, mailto: data.mailto }
         : { status: "failed", detail: data.error ?? "The unsubscribe request failed." };

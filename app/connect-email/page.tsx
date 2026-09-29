@@ -5,6 +5,7 @@ import { Suspense, useEffect, useState } from "react";
 import { ArrowLeft, Check, Inbox, LockKeyhole, Mail, ShieldCheck, Unplug } from "lucide-react";
 import { FcGoogle } from "react-icons/fc";
 import { useSearchParams } from "next/navigation";
+import { clearScanSnapshot } from "@/components/dashboard/scan-cache";
 
 export default function ConnectEmailPage() {
   return <Suspense fallback={null}><ConnectEmailContent /></Suspense>;
@@ -44,7 +45,10 @@ function ConnectEmailContent() {
 
   async function disconnectEmail() {
     const response = await fetch("/api/gmail/disconnect", { method: "POST" });
-    if (response.ok) setConnectedEmail(null);
+    if (response.ok) {
+      clearScanSnapshot();
+      setConnectedEmail(null);
+    }
     else setDisconnectError("Could not disconnect Gmail. Please try again.");
   }
 

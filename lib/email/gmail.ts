@@ -13,7 +13,10 @@ const scanQuery = `newer_than:${activeSenderWindowMonths}m -in:sent -in:chats -i
 const maxScanMessages = 1500;
 const maxSentMessages = 200;
 const maxBodyLookups = 40;
-const concurrency = 20;
+const concurrency = 8;
+// Gmail allows 250 quota units per user per second and list/get cost 5 units each (50/s).
+// Starting at most one request every 25ms (40/s) stays under that with headroom.
+const minRequestIntervalMs = 25;
 const metadataHeaders = [
   "From", "Subject", "Date", "List-Unsubscribe", "List-Unsubscribe-Post", "List-ID",
   "Precedence", "Authentication-Results", "DKIM-Signature",
@@ -37,27 +40,56 @@ function inspectError(error: unknown) {
   return { status, code, reasons };
 }
 
-function isAccessError(error: unknown) {
+/**
+ * Google reports rate limits as 403 PERMISSION_DENIED too, so the reason must be checked
+ * before a 403 can be read as lost access. Misconfigured client credentials are an app
+ * problem, not the user's, and must not disconnect them.
+ */
+export function classifyError(error: unknown): "revoked" | "retry" | "other" {
   const { status, code, reasons } = inspectError(error);
-  return status === 401
-    || ["invalid_grant", "unauthorized_client", "invalid_client"].includes(code)
-    || (status === 403 && (code === "PERMISSION_DENIED" || reasons.includes("insufficientPermissions")));
+  if (status === 429 || (status !== undefined && status >= 500)) return "retry";
+  if (reasons.some((reason) => /rateLimitExceeded|quotaExceeded|concurrentLimitExceeded|backendError/i.test(reason))) return "retry";
+  if (code === "invalid_client" || code === "unauthorized_client") return "other";
+  if (code === "invalid_grant" || status === 401) return "revoked";
+  if (status === 403 && reasons.includes("insufficientPermissions")) return "revoked";
+  return "other";
 }
 
-function isRetryable(error: unknown) {
-  const { status, reasons } = inspectError(error);
-  return status === 429 || (status !== undefined && status >= 500)
-    || (status === 403 && reasons.some((reason) => /rateLimitExceeded/i.test(reason)));
+function describeError(error: unknown) {
+  const { status, code, reasons } = inspectError(error);
+  return `status=${status ?? "none"} code=${code || "none"} reasons=${reasons.join(",") || "none"}`;
 }
 
-async function call<T>(operation: () => Promise<T>): Promise<T> {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One pacer per Gmail client, shared by every request a scan makes in parallel.
+const pacers = new WeakMap<Gmail, { nextStart: number }>();
+
+async function pace(gmail: Gmail) {
+  const pacer = pacers.get(gmail) ?? { nextStart: 0 };
+  pacers.set(gmail, pacer);
+  const now = Date.now();
+  const start = Math.max(now, pacer.nextStart);
+  pacer.nextStart = start + minRequestIntervalMs;
+  if (start > now) await sleep(start - now);
+}
+
+async function call<T>(gmail: Gmail, operation: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
+    await pace(gmail);
     try {
       return await operation();
     } catch (error) {
-      if (isAccessError(error)) throw new GmailAccessError("Gmail access was revoked or has expired.");
-      if (attempt >= 3 || !isRetryable(error)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      const kind = classifyError(error);
+      if (kind === "revoked") {
+        console.error("[gmail api] access lost:", describeError(error));
+        throw new GmailAccessError("Gmail access was revoked or has expired.");
+      }
+      if (kind !== "retry" || attempt >= 4) {
+        console.error("[gmail api] request failed:", describeError(error));
+        throw error;
+      }
+      await sleep(1000 * 2 ** (attempt - 1) + Math.random() * 500);
     }
   }
 }
@@ -82,7 +114,7 @@ async function listMessageIds(gmail: Gmail, q: string, limit: number) {
   const ids: string[] = [];
   let pageToken: string | undefined;
   do {
-    const { data } = await call(() => gmail.users.messages.list({ userId: "me", q, pageToken, maxResults: Math.min(500, limit - ids.length) }));
+    const { data } = await call(gmail, () => gmail.users.messages.list({ userId: "me", q, pageToken, maxResults: Math.min(500, limit - ids.length) }));
     ids.push(...(data.messages ?? []).flatMap((message) => (message.id ? [message.id] : [])));
     pageToken = data.nextPageToken ?? undefined;
   } while (pageToken && ids.length < limit);
@@ -90,7 +122,7 @@ async function listMessageIds(gmail: Gmail, q: string, limit: number) {
 }
 
 async function getMetadata(gmail: Gmail, id: string, headers: string[]): Promise<ScannedMessage | null> {
-  const { data } = await call(() => gmail.users.messages.get({ userId: "me", id, format: "metadata", metadataHeaders: headers }));
+  const { data } = await call(gmail, () => gmail.users.messages.get({ userId: "me", id, format: "metadata", metadataHeaders: headers }));
   if (!data.id) return null;
   return {
     id: data.id,
@@ -122,7 +154,7 @@ function collectBodies(part: gmail_v1.Schema$MessagePart | undefined, bodies = {
 
 /** Reads one message body only to find an unsubscribe link; the body itself is discarded. */
 async function findBodyUnsubscribeUrl(gmail: Gmail, id: string) {
-  const { data } = await call(() => gmail.users.messages.get({ userId: "me", id, format: "full" }));
+  const { data } = await call(gmail, () => gmail.users.messages.get({ userId: "me", id, format: "full" }));
   const bodies = collectBodies(data.payload);
   return extractBodyUnsubscribeUrl(bodies.html, bodies.text);
 }
@@ -183,7 +215,7 @@ export async function getRecentCorrespondents(gmail: Gmail) {
 export async function scanSender(gmail: Gmail, address: string) {
   const [{ ids }, sent] = await Promise.all([
     listMessageIds(gmail, `from:"${address}" ${scanQuery}`, 100),
-    call(() => gmail.users.messages.list({ userId: "me", q: `in:sent to:"${address}"`, maxResults: 1 })),
+    call(gmail, () => gmail.users.messages.list({ userId: "me", q: `in:sent to:"${address}"`, maxResults: 1 })),
   ]);
   const messages = await getMetadataBatch(gmail, ids, metadataHeaders);
   await addBodyUnsubscribeLinks(gmail, messages);
@@ -192,6 +224,6 @@ export async function scanSender(gmail: Gmail, address: string) {
 }
 
 export async function getGmailProfileEmail(gmail: Gmail) {
-  const { data } = await call(() => gmail.users.getProfile({ userId: "me" }));
+  const { data } = await call(gmail, () => gmail.users.getProfile({ userId: "me" }));
   return data.emailAddress?.toLowerCase() ?? null;
 }

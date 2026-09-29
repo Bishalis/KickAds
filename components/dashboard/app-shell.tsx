@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react";
 import { CircleHelp, Clock3, Inbox, LayoutDashboard, MailPlus, Menu, ShieldCheck, X } from "lucide-react";
 import { logout } from "@/app/actions/auth";
 import { Button } from "@/components/ui/button";
+import { clearScanSnapshot } from "./scan-cache";
 
 const workspaceItems = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
@@ -15,8 +16,8 @@ const workspaceItems = [
 
 const manageItems = [
   { label: "Connect email", href: "/connect-email", icon: MailPlus },
-  { label: "Privacy & data", href: "/learn/how-data-is-being-used", icon: ShieldCheck },
-  { label: "Help center", href: "/learn/how-it-works", icon: CircleHelp },
+  { label: "Privacy & data", href: "/dashboard/privacy", icon: ShieldCheck },
+  { label: "Help center", href: "/dashboard/help", icon: CircleHelp },
 ];
 
 function NavLink({ item, active, onClick }: { item: (typeof workspaceItems)[number]; active: boolean; onClick?: () => void }) {
@@ -61,7 +62,7 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
         {manageItems.map((item) => <NavLink key={item.href} item={item} active={pathname === item.href} onClick={onClose} />)}
       </nav>
 
-      <form action={logout} className="mt-auto px-2">
+      <form action={logout} onSubmit={clearScanSnapshot} className="mt-auto px-2">
         <Button type="submit" variant="outline" className="w-full border-gray-200 text-gray-600 hover:text-gray-950">Log out</Button>
       </form>
     </aside>
