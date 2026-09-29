@@ -1,8 +1,7 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { DetailPage } from "@/components/landing/detail-page";
-import { UnsubscriberWorkspace } from "@/components/dashboard/unsubscriber-workspace";
 import { featurePages } from "@/lib/landing-content";
 import { createClient } from "@/lib/supabase/server";
 
@@ -22,13 +21,14 @@ export default async function FeaturePage({ params }: FeaturePageProps) {
     notFound();
   }
 
-  if (slug === "unsubscriber") {
+  if (slug === "unsubscriber" || slug === "history") {
     const supabase = await createClient();
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
-    return <UnsubscriberWorkspace email={user?.email ?? "your account"} />;
+    // Signed-in users go to the real workspace; everyone else sees the feature page.
+    if (user) redirect(`/dashboard/${slug}`);
   }
 
   return (

@@ -16,16 +16,12 @@ export async function GET(request: Request) {
 
   if (code) {
     const supabase = await createClient();
-    const {data, error } = await supabase.auth.exchangeCodeForSession(code);
-   
-
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      console.log("Successfully exchanged code for session:", data);
       return NextResponse.redirect(new URL(destination, requestUrl.origin));
-    } else {
-      console.error("Error exchanging code for session:", error);
     }
-
+    // Never log the session itself: it contains access, refresh, and provider tokens.
+    console.error("Error exchanging code for session:", error.message);
   }
 
   return NextResponse.redirect(

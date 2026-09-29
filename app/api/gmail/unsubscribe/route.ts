@@ -1,32 +1,112 @@
-import { classifySenderGroups } from "@/lib/email/classifier";
-import { getGmailInfo } from "@/lib/email/gmail";
-import { getGmailToken } from "@/lib/email/google-oauth";
-import { createClient } from "@/lib/supabase/server";
+import { buildSenderGroups, evaluateUnsubscribe, type SenderGroup } from "@/lib/email/classifier";
+import { createGmailClient, scanSender } from "@/lib/email/gmail";
+import { handleRouteError, jsonError } from "@/lib/email/route-helpers";
+import { sendOneClickUnsubscribe } from "@/lib/email/safe-fetch";
+import { isValidEmailAddress } from "@/lib/email/sender";
+import {
+  countRecentActions,
+  finishUnsubscribeAction,
+  getAuthedContext,
+  getGmailConnection,
+  getLatestAction,
+  listSenderRules,
+  recordUnsubscribeAction,
+  startUnsubscribeAction,
+} from "@/lib/email/store";
 import { NextResponse } from "next/server";
 
-export async function POST(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  const token = await getGmailToken();
-  if (!user) return NextResponse.json({ error: "Please sign in." }, { status: 401 });
-  if (!token || token.userId !== user.id) return NextResponse.json({ error: "Gmail is not connected" }, { status: 400 });
+export const maxDuration = 30;
 
-  const body = await request.json().catch(() => null) as { senderEmail?: string; confirmed?: boolean } | null;
-  if (!body?.confirmed || !body.senderEmail) return NextResponse.json({ error: "Explicit confirmation is required." }, { status: 400 });
+const maxActionsPer10Minutes = 30;
+
+function targetHost(url?: string, mailto?: string) {
+  if (url) return new URL(url).hostname;
+  return mailto?.replace(/^mailto:/, "").split("?")[0].split("@")[1] ?? null;
+}
+
+export async function POST(request: Request) {
+  const context = await getAuthedContext();
+  if (!context) return jsonError("Please sign in.", 401);
+
+  const body = await request.json().catch(() => null) as { key?: unknown; confirmed?: unknown; acknowledgeReview?: unknown } | null;
+  const key = typeof body?.key === "string" && body.key.length <= 600 ? body.key : "";
+  const address = key.split("|")[0];
+  if (!isValidEmailAddress(address)) return jsonError("Choose a sender to unsubscribe from.", 400);
+  if (body?.confirmed !== true) return jsonError("Explicit confirmation is required.", 400);
 
   try {
-    const groups = classifySenderGroups(await getGmailInfo(token));
-    const group = groups.find((item) => item.senderEmail === body.senderEmail?.trim().toLowerCase());
-    if (!group) return NextResponse.json({ error: "Sender was not found in the connected Gmail account." }, { status: 404 });
-    if (!group.isSubscription || group.isProtected || !group.unsubscribeAvailable || !group.oneClickUnsubscribe || !group.unsubscribeUrl) {
-      return NextResponse.json({ error: "This sender is protected or does not have a supported one-click unsubscribe option." }, { status: 400 });
+    if (await countRecentActions(context, 10 * 60_000) >= maxActionsPer10Minutes) {
+      return jsonError("Too many unsubscribe attempts. Please wait a few minutes.", 429);
     }
-    return NextResponse.json({
-      status: "ready_for_confirmation",
-      message: "The sender is classified as a safe unsubscribe candidate. No unsubscribe request was sent.",
-      unsubscribe: group.unsubscribe,
-    });
+    const connection = await getGmailConnection(context);
+    if (!connection) return jsonError("Gmail is not connected.", 400, { gmailConnected: false });
+
+    // Re-derive the sender from Gmail right now; never trust a URL or classification from the browser.
+    const gmail = createGmailClient(connection.refreshToken);
+    const [{ messages, correspondents }, rules] = await Promise.all([scanSender(gmail, address), listSenderRules(context)]);
+    const group = buildSenderGroups(messages, { rules, correspondents }).find((item) => item.key === key);
+    if (!group) return jsonError("No recent email from this sender was found in your connected Gmail.", 404);
+
+    const decision = evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: body.acknowledgeReview === true });
+    if (decision.outcome === "blocked") return jsonError(decision.reason, 409);
+
+    const latest = await getLatestAction(context, key);
+    if (latest?.status === "success" && Date.parse(latest.createdAt) >= group.lastReceivedAt) {
+      return NextResponse.json({ status: "success", actionId: latest.id, detail: "You already unsubscribed, and no new email from this sender has arrived since." });
+    }
+
+    return NextResponse.json(await execute(context, group, decision));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unsubscribe failed." }, { status: 502 });
+    return handleRouteError(error, context, "unsubscribe");
   }
+}
+
+async function execute(
+  context: NonNullable<Awaited<ReturnType<typeof getAuthedContext>>>,
+  group: SenderGroup,
+  decision: Exclude<ReturnType<typeof evaluateUnsubscribe>, { outcome: "blocked" }>,
+) {
+  const record = {
+    senderKey: group.key,
+    senderAddress: group.address,
+    senderDomain: group.domain,
+    displayName: group.displayName,
+    listId: group.listId,
+    method: group.unsubscribe.method,
+    targetHost: targetHost(group.unsubscribe.url, group.unsubscribe.mailto),
+  };
+
+  if (decision.outcome === "no_method") {
+    const detail = "No unsubscribe option was found for this sender. You could filter or block it in Gmail instead.";
+    const actionId = await recordUnsubscribeAction(context, record, { status: "no_method", detail });
+    return { status: "no_method", actionId, detail };
+  }
+
+  if (decision.outcome === "manual") {
+    const detail = decision.mailto
+      ? "This sender unsubscribes by email. Send the prepared message from your mail app."
+      : "This sender needs you to finish on their website. Open the link, then mark it done in History.";
+    const actionId = await recordUnsubscribeAction(context, record, { status: "manual_required", detail });
+    return { status: "manual_required", actionId, detail, manualUrl: decision.url, mailto: decision.mailto };
+  }
+
+  const actionId = await startUnsubscribeAction(context, record);
+  if (!actionId) return { status: "pending", actionId: null, detail: "An unsubscribe request for this sender is already in progress." };
+
+  const result = await sendOneClickUnsubscribe(decision.url);
+  const outcome = result.kind === "accepted"
+    ? { status: "success" as const, detail: "The sender accepted the one-click unsubscribe request. It can take a few days for their emails to stop.", httpStatus: result.status }
+    : result.kind === "redirected"
+      ? { status: "manual_required" as const, detail: "The sender redirected instead of confirming. Finish on their page, then mark it done in History.", httpStatus: result.status }
+      : result.kind === "rejected"
+        ? { status: "failed" as const, detail: `The sender rejected the request (HTTP ${result.status}). You can try their unsubscribe page instead.`, httpStatus: result.status }
+        : { status: "failed" as const, detail: result.detail };
+  await finishUnsubscribeAction(context, actionId, outcome);
+  return {
+    status: outcome.status,
+    actionId,
+    detail: outcome.detail,
+    // A blocked or unreachable host is not handed to the browser either.
+    manualUrl: result.kind === "redirected" || result.kind === "rejected" ? decision.url : undefined,
+  };
 }

@@ -1,214 +1,281 @@
-import type { GmailMessage } from "@/lib/email/gmail.ts";
+import { decodeEncodedWords, isPersonalMailboxDomain, isSameOrSubdomain, normalizeSender } from "./sender.ts";
+import {
+  getHeader,
+  parseListUnsubscribe,
+  parseSenderAuthentication,
+  type Header,
+  type SenderAuthentication,
+  type UnsubscribeInfo,
+  type UnsubscribeMethod,
+} from "./unsubscribe.ts";
 
 export type Classification = "subscription" | "protected" | "review";
-export type SubscriptionCategory = "newsletter" | "digest" | "alert" | "marketing" | "unknown";
-export type ClassificationConfidence = "high" | "medium" | "low";
+export type Confidence = "high" | "medium" | "low";
+/** How an unsubscribe would be carried out: sent by the server, opened by the user, or not possible. */
+export type ExecutionMode = "automatic" | "manual" | "none";
 
-export type NormalizedSender = {
-  displayName: string;
-  email: string;
-  domain: string;
+/** Header-level view of one Gmail message. Bodies never leave the Gmail fetch layer. */
+export type ScannedMessage = {
+  id: string;
+  internalDate: number;
+  labelIds: string[];
+  headers: Header[];
+  bodyUnsubscribeUrl?: string;
 };
 
-export type UnsubscribeInfo = {
-  method: UnsubscribeMethod;
-  url?: string;
-  email?: string;
+export type SenderRule = {
+  id: string;
+  kind: "protect" | "ignore";
+  matchType: "address" | "domain";
+  value: string;
 };
 
-export type UnsubscribeMethod = "one_click" | "https" | "mailto" | "body_link" | "none";
-
-export type ClassifiedEmail = GmailMessage & {
-  sender: NormalizedSender;
-  date: string;
-  classification: Classification;
-  category: SubscriptionCategory;
-  confidence: ClassificationConfidence;
-  isProtected: boolean;
-  unsubscribeAvailable: boolean;
-  unsubscribe?: UnsubscribeInfo;
+export type ScanContext = {
+  rules: SenderRule[];
+  /** Addresses the user has sent mail to. */
+  correspondents: Set<string>;
 };
 
 export type SenderGroup = {
   key: string;
   displayName: string;
-  senderEmail: string;
+  address: string;
   domain: string;
-  emails: ClassifiedEmail[];
-  totalEmails: number;
-  lastReceivedAt?: string;
+  listId: string | null;
+  messages: ScannedMessage[];
+  lastReceivedAt: number;
   classification: Classification;
-  isSubscription: boolean;
-  isProtected: boolean;
-  unsubscribeAvailable: boolean;
-  unsubscribe?: UnsubscribeInfo;
-  unsubscribeUrl?: string;
-  oneClickUnsubscribe: boolean;
-  classificationReason: string;
-  subscriptions: Array<{
-    key: string;
-    category: SubscriptionCategory;
-    emails: ClassifiedEmail[];
-    totalEmails: number;
-    unsubscribeAvailable: boolean;
-    unsubscribe?: UnsubscribeInfo;
-    confidence: ClassificationConfidence;
-    classificationReason: string;
-  }>;
-  protectedEmails: ClassifiedEmail[];
-  reviewEmails: ClassifiedEmail[];
+  confidence: Confidence;
+  reasons: string[];
+  protectRule: SenderRule | null;
+  ignoreRule: SenderRule | null;
+  unsubscribe: UnsubscribeInfo;
+  authentication: SenderAuthentication;
 };
 
-const protectedRules: Array<[string, RegExp]> = [
-  ["security or authentication", /password (?:was )?changed|new login|sign(?:ed)? in|verification code|verify your email|two[- ]?factor|2fa|authentication|suspicious activity/i],
-  ["financial or payment", /bank statement|transaction (?:alert|confirmation)|payment (?:received|failed|processed)|invoice|receipt|refund|transfer (?:confirmation|failed)|withdrawal|deposit/i],
-  ["order or delivery", /order (?:confirmation|has shipped|shipped)|purchase confirmation|shipping confirmation|shipment|delivery|tracking number/i],
-  ["account or policy", /account (?:notification|update|suspended)|terms (?:of service|update)|privacy policy|membership (?:status|renewal)/i],
-  ["education", /university|college|student|assignment|exam|enrol(?:l|l)ment|academic/i],
-  ["employment", /job application|employment|interview|roster|shift|payroll|payslip/i],
-  ["government or legal", /government|tax statement|ato|legal notice|court|official notice/i],
-  ["health", /appointment confirmation|medical|health record|hospital|clinic|prescription/i],
+/** What the browser receives: no bodies, no unsubscribe URLs, no message IDs. */
+export type SenderSummary = {
+  key: string;
+  displayName: string;
+  address: string;
+  domain: string;
+  listId: string | null;
+  emailCount: number;
+  lastReceivedAt: string;
+  sampleSubjects: string[];
+  classification: Classification;
+  confidence: Confidence;
+  reasons: string[];
+  unsubscribeMethod: UnsubscribeMethod;
+  execution: ExecutionMode;
+  protectedBy: SenderRule["matchType"] | null;
+  ignored: boolean;
+};
+
+export type ScanStats = {
+  analyzed: number;
+  senders: number;
+  subscriptions: number;
+  protected: number;
+  review: number;
+  ignored: number;
+  capped: boolean;
+};
+
+// Subject patterns for messages people usually cannot afford to miss. These are one
+// signal among several: they can only move a sender toward "protected" or "review",
+// never toward "subscription".
+const importantSubjectRules: Array<[string, RegExp]> = [
+  ["security or sign-in", /password|sign[- ]?in|log[- ]?in|verification code|one[- ]time (?:code|pass)|passcode|\b2fa\b|two[- ]factor|security (?:alert|notice|code)|verify your|account (?:locked|suspended|recovery)/i],
+  ["financial", /statement|payment|invoice|receipt|refund|transfer|withdrawal|deposit|direct debit|overdue|\bbill(?:ing)?\b|transaction|balance/i],
+  ["order or delivery", /\border\b.*(?:confirm|shipped|dispatched|delivered|#\s?\d)|shipping|delivery|tracking|out for delivery/i],
+  ["account or policy", /account (?:update|notification|change)|terms of (?:service|use)|privacy policy/i],
+  ["education", /enrol(?:l)?ment|\bexam\b|assignment|\bgrades?\b|timetable|tuition|semester/i],
+  ["employment", /interview|job application|offer letter|payslip|payroll|\broster\b|\bshift\b/i],
+  ["government or legal", /\btax\b|\bATO\b|\bIRS\b|\bHMRC\b|\bcourt\b|legal notice|\bvisa\b|passport|\bcouncil\b/i],
+  ["health", /appointment|prescription|test results|medical|clinic|hospital/i],
 ];
 
-const subscriptionWords = /newsletter|digest|weekly|monthly|daily|sale|deal|discount|offer|promotion|marketing|campaign|recommendations?|new products?/i;
-const categoryRules: Array<[SubscriptionCategory, RegExp]> = [
-  ["newsletter", /newsletter/i],
-  ["digest", /digest|weekly|monthly|daily/i],
-  ["alert", /alert|notification|breaking news/i],
-  ["marketing", /sale|deal|discount|offer|promotion|marketing|campaign|recommendations?|new products?/i],
-];
-
-function header(message: GmailMessage, name: string) {
-  return message.headers.find((item) => item.name.toLowerCase() === name.toLowerCase())?.value?.trim() ?? "";
+function ratio(messages: ScannedMessage[], label: string) {
+  return messages.filter((message) => message.labelIds.includes(label)).length / messages.length;
 }
 
-export function getMessageHeader(message: GmailMessage, name: string) {
-  return header(message, name);
+function normalizeListId(value: string) {
+  const id = (value.match(/<([^>]+)>/)?.[1] ?? value).trim().toLowerCase();
+  return id ? id.slice(0, 255) : null;
 }
 
-export function normalizeSender(value: string): NormalizedSender {
-  const match = value.match(/^(.*?)\s*<([^>]+)>\s*$/);
-  const email = (match?.[2] ?? value).trim().toLowerCase();
-  const safeEmail = email.includes("@") ? email : "unknown@unknown.invalid";
-  const displayName = (match?.[1] ?? safeEmail.split("@")[0]).replace(/^"|"$/g, "").trim() || "Unknown sender";
-  return { displayName, email: safeEmail, domain: safeEmail.split("@")[1] ?? "unknown.invalid" };
+export function getSubject(message: ScannedMessage) {
+  return decodeEncodedWords(getHeader(message.headers, "Subject"));
 }
 
-function unsubscribeInfo(message: GmailMessage): UnsubscribeInfo {
-  const listUnsubscribe = header(message, "List-Unsubscribe");
-  const candidate = listUnsubscribe.match(/<([^>]+)>/i)?.[1];
-  if (!candidate) return { method: "none" };
-  if (candidate.toLowerCase().startsWith("mailto:")) {
-    return { method: "mailto", email: candidate.slice("mailto:".length).split("?")[0] };
+export function findRule(rules: SenderRule[], kind: SenderRule["kind"], address: string, domain: string) {
+  return rules.find((rule) => rule.kind === kind && (
+    rule.matchType === "address" ? rule.value === address : Boolean(domain) && isSameOrSubdomain(domain, rule.value)
+  )) ?? null;
+}
+
+function decide(group: Omit<SenderGroup, "classification" | "confidence" | "reasons">, context: ScanContext): Pick<SenderGroup, "classification" | "confidence" | "reasons"> {
+  const { messages, address, domain, listId, unsubscribe, authentication } = group;
+
+  // 1. The user's own decision always wins.
+  if (group.protectRule) {
+    return { classification: "protected", confidence: "high", reasons: [`You protected this ${group.protectRule.matchType === "domain" ? "domain" : "sender"}`] };
   }
-  if (!isSafeOneClickUrl(candidate)) return { method: "none" };
+  if (!address) {
+    return { classification: "review", confidence: "low", reasons: ["The sender address could not be read"] };
+  }
+
+  // 2. Evidence that this sender matters to the user.
+  const importantEvidence: string[] = [];
+  if (context.correspondents.has(address)) importantEvidence.push("You have sent email to this address");
+  if (messages.some((message) => message.labelIds.includes("STARRED"))) importantEvidence.push("You starred email from this sender");
+  if (isPersonalMailboxDomain(domain)) importantEvidence.push("Sent from a personal mailbox, not a mailing service");
+  const importantTopics = new Set(messages.flatMap((message) => {
+    const subject = getSubject(message);
+    return importantSubjectRules.filter(([, pattern]) => pattern.test(subject)).map(([topic]) => topic);
+  }));
+  if (importantTopics.size) importantEvidence.push(`Some subjects look like ${[...importantTopics].join(", ")} messages`);
+
+  // 3. Structural evidence of a mailing list, independent of wording.
+  const listHeaderCount = messages.filter((message) => parseListUnsubscribe(message.headers).method !== "none").length;
+  const bulk = messages.some((message) => /^(bulk|list)$/i.test(getHeader(message.headers, "Precedence")));
+  const promotions = ratio(messages, "CATEGORY_PROMOTIONS");
+  const subscriptionEvidence: string[] = [];
+  if (listHeaderCount) subscriptionEvidence.push("Has a List-Unsubscribe header");
+  if (listId) subscriptionEvidence.push("Sent through a mailing list (List-ID)");
+  if (bulk) subscriptionEvidence.push("Marked as bulk mail");
+  if (promotions >= 0.5) subscriptionEvidence.push("Gmail files it under Promotions");
+
+  if (importantEvidence.length) {
+    return subscriptionEvidence.length
+      ? { classification: "review", confidence: "low", reasons: [...importantEvidence, `Also looks like a mailing list: ${subscriptionEvidence.join("; ").toLowerCase()}`] }
+      : { classification: "protected", confidence: "medium", reasons: importantEvidence };
+  }
+  if (!subscriptionEvidence.length) {
+    return { classification: "review", confidence: "low", reasons: [unsubscribe.method === "body_link" ? "Only an unsubscribe link in the email body; no mailing-list headers" : "No mailing-list signals found"] };
+  }
+
+  // 4. Looks like a list. Stay conservative about who sent it and what kind of mail it is.
+  if (listHeaderCount && !authentication.verified) {
+    return { classification: "review", confidence: "low", reasons: [...subscriptionEvidence, "Gmail could not verify the sender (DKIM/DMARC), so the unsubscribe link may not be genuine"] };
+  }
+  const updates = ratio(messages, "CATEGORY_UPDATES");
+  if (updates >= 0.5 && promotions < 0.5 && !listId && !bulk) {
+    return { classification: "review", confidence: "low", reasons: [...subscriptionEvidence, "Gmail files it under Updates, which is typical for account and service notifications"] };
+  }
+  if (ratio(messages, "IMPORTANT") >= 0.5 && promotions < 0.5) {
+    return { classification: "review", confidence: "low", reasons: [...subscriptionEvidence, "Gmail marks most of these emails as important"] };
+  }
+
+  const strong = listHeaderCount > 0 && authentication.verified && (Boolean(listId) || bulk || promotions >= 0.5) && messages.length >= 2;
+  return { classification: "subscription", confidence: strong ? "high" : "medium", reasons: subscriptionEvidence };
+}
+
+function groupKey(address: string, listId: string | null, displayName: string) {
+  return address ? `${address}|${listId ?? ""}` : `unknown|${displayName.toLowerCase()}`;
+}
+
+/**
+ * Groups messages by sender address plus List-ID, so different lists from one address
+ * stay separate and a list never absorbs transactional mail sent without a List-ID.
+ */
+export function buildSenderGroups(messages: ScannedMessage[], context: ScanContext): SenderGroup[] {
+  const buckets = new Map<string, { displayName: string; address: string; domain: string; listId: string | null; messages: ScannedMessage[] }>();
+  for (const message of messages) {
+    const sender = normalizeSender(getHeader(message.headers, "From"));
+    const listId = normalizeListId(getHeader(message.headers, "List-ID"));
+    const key = groupKey(sender.email, listId, sender.displayName);
+    const bucket = buckets.get(key) ?? { displayName: sender.displayName, address: sender.email, domain: sender.domain, listId, messages: [] };
+    bucket.messages.push(message);
+    buckets.set(key, bucket);
+  }
+
+  return [...buckets.entries()].map(([key, bucket]) => {
+    const sorted = bucket.messages.toSorted((a, b) => b.internalDate - a.internalDate);
+    // The newest message carries the most current unsubscribe endpoint.
+    const headerTarget = sorted.find((message) => parseListUnsubscribe(message.headers).method !== "none");
+    const bodyTarget = sorted.find((message) => message.bodyUnsubscribeUrl);
+    const unsubscribe: UnsubscribeInfo = headerTarget
+      ? parseListUnsubscribe(headerTarget.headers)
+      : bodyTarget ? { method: "body_link", url: bodyTarget.bodyUnsubscribeUrl } : { method: "none" };
+    const partial = {
+      key,
+      displayName: normalizeSender(getHeader(sorted[0].headers, "From")).displayName || bucket.displayName,
+      address: bucket.address,
+      domain: bucket.domain,
+      listId: bucket.listId,
+      messages: sorted,
+      lastReceivedAt: sorted[0].internalDate,
+      protectRule: bucket.address ? findRule(context.rules, "protect", bucket.address, bucket.domain) : null,
+      ignoreRule: bucket.address ? findRule(context.rules, "ignore", bucket.address, bucket.domain) : null,
+      unsubscribe,
+      authentication: parseSenderAuthentication((headerTarget ?? sorted[0]).headers, bucket.domain),
+    };
+    return { ...partial, ...decide(partial, context) };
+  }).sort((a, b) => b.messages.length - a.messages.length);
+}
+
+export type UnsubscribeDecision =
+  | { outcome: "blocked"; reason: string }
+  | { outcome: "no_method" }
+  | { outcome: "automatic"; url: string }
+  | { outcome: "manual"; method: UnsubscribeMethod; url?: string; mailto?: string };
+
+/**
+ * The only gate between a classification and an unsubscribe action. The server sends a
+ * request itself only for an RFC 8058 one-click endpoint on a verified, DKIM-signed
+ * subscription; everything else is handed back to the user to open themselves.
+ */
+export function evaluateUnsubscribe(group: SenderGroup, options: { confirmed: boolean; acknowledgeReview: boolean }): UnsubscribeDecision {
+  if (!options.confirmed) return { outcome: "blocked", reason: "Explicit confirmation is required." };
+  if (group.classification === "protected") return { outcome: "blocked", reason: "This sender is protected. Remove the protection first if you really want to unsubscribe." };
+  if (group.classification === "review" && !options.acknowledgeReview) return { outcome: "blocked", reason: "This sender needs review. Confirm that you have reviewed it first." };
+  if (!group.address) return { outcome: "blocked", reason: "The sender address could not be read." };
+
+  const { method, url, mailto } = group.unsubscribe;
+  if (method === "none") return { outcome: "no_method" };
+  if (method === "one_click" && url && group.classification === "subscription" && group.authentication.verified && group.authentication.listHeadersSigned) {
+    return { outcome: "automatic", url };
+  }
+  return { outcome: "manual", method, url, mailto };
+}
+
+export function getExecutionMode(group: SenderGroup): ExecutionMode {
+  if (group.classification === "protected" || group.unsubscribe.method === "none" || !group.address) return "none";
+  const decision = evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: true });
+  return decision.outcome === "automatic" ? "automatic" : decision.outcome === "manual" ? "manual" : "none";
+}
+
+export function toSenderSummary(group: SenderGroup): SenderSummary {
   return {
-    method: /list-unsubscribe\s*=\s*one-click/i.test(header(message, "List-Unsubscribe-Post")) ? "one_click" : "https",
-    url: candidate,
+    key: group.key,
+    displayName: group.displayName,
+    address: group.address,
+    domain: group.domain,
+    listId: group.listId,
+    emailCount: group.messages.length,
+    lastReceivedAt: new Date(group.lastReceivedAt).toISOString(),
+    sampleSubjects: group.messages.slice(0, 3).map((message) => getSubject(message).slice(0, 140) || "(No subject)"),
+    classification: group.classification,
+    confidence: group.confidence,
+    reasons: group.reasons,
+    unsubscribeMethod: group.unsubscribe.method,
+    execution: getExecutionMode(group),
+    protectedBy: group.protectRule?.matchType ?? null,
+    ignored: Boolean(group.ignoreRule) && !group.protectRule,
   };
 }
 
-function classifyMessage(message: GmailMessage, sender: NormalizedSender): ClassifiedEmail {
-  const subject = header(message, "Subject");
-  // Sender addresses are not classification text: account@sender.com must not protect every message.
-  const protectedMatch = protectedRules.find(([, rule]) => rule.test(subject));
-  const unsubscribe = unsubscribeInfo(message);
-  const category = categoryRules.find(([, rule]) => rule.test(subject))?.[0] ?? "unknown";
-  const hasSubscriptionSignal = Boolean(unsubscribe.method !== "none" || subscriptionWords.test(subject));
-  const classification: Classification = protectedMatch ? "protected" : hasSubscriptionSignal ? "subscription" : "review";
-  const confidence: ClassificationConfidence = protectedMatch || unsubscribe.method === "one_click" ? "high" : hasSubscriptionSignal ? "medium" : "low";
+export function getScanStats(groups: SenderGroup[], capped: boolean): ScanStats {
+  const visible = groups.filter((group) => !group.ignoreRule || group.protectRule);
   return {
-    ...message,
-    sender,
-    date: header(message, "Date"),
-    classification,
-    category,
-    confidence,
-    isProtected: Boolean(protectedMatch),
-    unsubscribeAvailable: unsubscribe.method !== "none",
-    unsubscribe: unsubscribe.method !== "none" ? unsubscribe : undefined,
+    analyzed: groups.reduce((total, group) => total + group.messages.length, 0),
+    senders: groups.length,
+    subscriptions: visible.filter((group) => group.classification === "subscription").length,
+    protected: visible.filter((group) => group.classification === "protected").length,
+    review: visible.filter((group) => group.classification === "review").length,
+    ignored: groups.length - visible.length,
+    capped,
   };
-}
-
-export function classifySenderGroups(messages: GmailMessage[]): SenderGroup[] {
-  const normalized = messages.map((message) => ({ message, sender: normalizeSender(header(message, "From")) }));
-  const groups = new Map<string, SenderGroup>();
-  for (const { message, sender } of normalized) {
-    const email = classifyMessage(message, sender);
-    const existing = groups.get(sender.email);
-    if (existing) {
-      existing.emails.push(email);
-      existing.totalEmails += 1;
-      if (!existing.lastReceivedAt || new Date(email.date).getTime() > new Date(existing.lastReceivedAt).getTime()) existing.lastReceivedAt = email.date;
-      if (!existing.unsubscribeAvailable && email.unsubscribeAvailable) {
-        existing.unsubscribeAvailable = true;
-        existing.unsubscribe = email.unsubscribe;
-        existing.unsubscribeUrl = email.unsubscribe?.url;
-        existing.oneClickUnsubscribe = email.unsubscribe?.method === "one_click";
-      }
-      continue;
-    }
-    groups.set(sender.email, {
-      key: sender.email,
-      displayName: sender.displayName,
-      senderEmail: sender.email,
-      domain: sender.domain,
-      emails: [email],
-      totalEmails: 1,
-      lastReceivedAt: email.date,
-      classification: email.classification,
-      isSubscription: email.classification === "subscription",
-      isProtected: email.isProtected,
-      unsubscribeAvailable: email.unsubscribeAvailable,
-      unsubscribe: email.unsubscribe,
-      unsubscribeUrl: email.unsubscribe?.url,
-      oneClickUnsubscribe: email.unsubscribe?.method === "one_click",
-      classificationReason: protectedRules.find(([, rule]) => rule.test(header(message, "Subject")))?.[0] ?? (email.classification === "subscription" ? "subscription signals found" : "not enough signals; review recommended"),
-      subscriptions: [],
-      protectedEmails: [],
-      reviewEmails: [],
-    });
-  }
-
-  for (const group of groups.values()) {
-    group.protectedEmails = group.emails.filter((email) => email.classification === "protected");
-    group.reviewEmails = group.emails.filter((email) => email.classification === "review");
-    const subscriptions = new Map<string, SenderGroup["subscriptions"][number]>();
-    for (const email of group.emails.filter((item) => item.classification === "subscription")) {
-      const key = `${email.category}:${email.unsubscribe?.url ?? email.sender.email}`;
-      const existing = subscriptions.get(key);
-      if (existing) {
-        existing.emails.push(email);
-        existing.totalEmails += 1;
-        existing.unsubscribeAvailable ||= email.unsubscribeAvailable;
-        existing.unsubscribe ??= email.unsubscribe;
-        if (email.confidence === "high") existing.confidence = "high";
-      } else {
-        subscriptions.set(key, {
-          key,
-          category: email.category,
-          emails: [email],
-          totalEmails: 1,
-          unsubscribeAvailable: email.unsubscribeAvailable,
-          unsubscribe: email.unsubscribe,
-          confidence: email.confidence,
-          classificationReason: email.unsubscribe?.method === "one_click" ? "RFC 8058 one-click header" : "subscription subject signals",
-        });
-      }
-    }
-    group.subscriptions = [...subscriptions.values()];
-    group.classification = group.subscriptions.length ? "subscription" : group.protectedEmails.length ? "protected" : "review";
-    group.isSubscription = group.subscriptions.length > 0;
-    group.isProtected = group.protectedEmails.length > 0;
-    // Protection belongs to the individual email/category, never the whole sender.
-  }
-  return [...groups.values()].sort((first, second) => second.totalEmails - first.totalEmails);
-}
-
-export function isSafeOneClickUrl(value: string) {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
 }

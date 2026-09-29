@@ -14,7 +14,8 @@ export async function GET(request: Request) {
   if (!user) return NextResponse.redirect(new URL("/auth/login", request.url));
 
   try {
-    const state = randomBytes(32).toString("hex");
+    // Bind the state to the user so a callback can't complete under a different session.
+    const state = `${randomBytes(32).toString("hex")}.${user.id}`;
     const client = createGoogleOAuthClient(new URL(request.url).origin);
     const cookieStore = await cookies();
     cookieStore.set(gmailStateCookie, state, {
@@ -22,11 +23,11 @@ export async function GET(request: Request) {
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
       maxAge: 600,
-      path: "/",
+      path: "/api/gmail/callback",
     });
     return NextResponse.redirect(getGmailAuthorizationUrl(client, state));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Gmail is not configured.";
-    return NextResponse.redirect(new URL(`/connect-email?error=${encodeURIComponent(message)}`, request.url));
+    console.error("[gmail connect] failed:", error instanceof Error ? error.message : "unknown error");
+    return NextResponse.redirect(new URL("/connect-email?error=config", request.url));
   }
 }

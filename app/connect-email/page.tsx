@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
-import { ArrowLeft, Check, Inbox, LockKeyhole, Mail, Plus, ShieldCheck, Unplug } from "lucide-react";
+import { ArrowLeft, Check, Inbox, LockKeyhole, Mail, ShieldCheck, Unplug } from "lucide-react";
 import { FcGoogle } from "react-icons/fc";
 import { useSearchParams } from "next/navigation";
 
@@ -10,12 +10,23 @@ export default function ConnectEmailPage() {
   return <Suspense fallback={null}><ConnectEmailContent /></Suspense>;
 }
 
+// Only known codes are displayed, so the URL can't be used to put arbitrary text on this page.
+const errorMessages: Record<string, string> = {
+  config: "Gmail connection isn't configured on this server yet.",
+  expired: "The Gmail connection request expired. Please try again.",
+  denied: "Gmail access was not granted.",
+  scope: "Gmail access wasn't included in what you approved. Please try again and allow read-only Gmail access.",
+  failed: "Could not connect Gmail. Please try again.",
+};
+
 function ConnectEmailContent() {
   const searchParams = useSearchParams();
-  const error = searchParams.get("error");
+  const errorCode = searchParams.get("error");
+  const error = errorCode ? errorMessages[errorCode] ?? errorMessages.failed : null;
   const connected = searchParams.get("connected") === "true";
   const [connectedEmail, setConnectedEmail] = useState<string | null>(null);
   const [isCheckingConnection, setIsCheckingConnection] = useState(true);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadConnection() {
@@ -34,6 +45,7 @@ function ConnectEmailContent() {
   async function disconnectEmail() {
     const response = await fetch("/api/gmail/disconnect", { method: "POST" });
     if (response.ok) setConnectedEmail(null);
+    else setDisconnectError("Could not disconnect Gmail. Please try again.");
   }
 
   return (
@@ -76,7 +88,7 @@ function ConnectEmailContent() {
                     </div>
                     <button type="button" onClick={disconnectEmail} className="shrink-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50"><Unplug className="mr-1.5 inline h-4 w-4" />Disconnect</button>
                   </div>
-                  <a href="/api/gmail/connect" className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white text-sm font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50"><Plus className="h-4 w-4" />Add another email</a>
+                  <Link href="/dashboard/unsubscriber" className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary text-sm font-semibold text-white shadow-sm transition-colors hover:bg-purple-800">Review subscriptions</Link>
                 </div>
               ) : (
                 <a href="/api/gmail/connect" className="mt-8 flex h-12 w-full items-center justify-center gap-3 rounded-xl border border-gray-300 bg-white font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50"><FcGoogle size={22} />Connect Gmail</a>
@@ -84,18 +96,18 @@ function ConnectEmailContent() {
 
               {connected && <p className="mt-3 text-sm text-emerald-700" role="status">Gmail connected. Your inbox is ready to review.</p>}
               {!connectedEmail && isCheckingConnection && <p className="mt-3 text-sm text-gray-500">Checking connected accounts...</p>}
-              {error && <p className="mt-3 text-sm text-destructive" role="alert">{error}</p>}
+              {(error || disconnectError) && <p className="mt-3 text-sm text-destructive" role="alert">{disconnectError ?? error}</p>}
 
               <div className="mt-8 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
                   <LockKeyhole className="h-5 w-5 text-primary" />
                   <p className="mt-3 text-sm font-semibold">Read-only access</p>
-                  <p className="mt-1 text-xs leading-5 text-gray-500">We do not send, edit, or delete messages without your action.</p>
+                  <p className="mt-1 text-xs leading-5 text-gray-500">We can read headers to find subscriptions but can never send, edit, or delete your email.</p>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
                   <ShieldCheck className="h-5 w-5 text-emerald-600" />
                   <p className="mt-3 text-sm font-semibold">Your choice</p>
-                  <p className="mt-1 text-xs leading-5 text-gray-500">Manage access from your Google account at any time.</p>
+                  <p className="mt-1 text-xs leading-5 text-gray-500">Disconnecting revokes our access at Google immediately.</p>
                 </div>
               </div>
             </section>

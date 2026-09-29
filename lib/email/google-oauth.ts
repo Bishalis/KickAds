@@ -1,16 +1,10 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { cookies } from "next/headers";
 import { google } from "googleapis";
 
-export const gmailTokenCookie = "kickads-gmail-token";
 export const gmailStateCookie = "kickads-gmail-oauth-state";
+export const gmailReadonlyScope = "https://www.googleapis.com/auth/gmail.readonly";
 
-export type GmailToken = {
-  userId: string;
-  accessToken: string;
-  refreshToken?: string;
-  email?: string;
-};
+export type GoogleOAuthClient = InstanceType<typeof google.auth.OAuth2>;
 
 function getSecret() {
   const secret = process.env.GOOGLE_TOKEN_ENCRYPTION_SECRET;
@@ -18,64 +12,52 @@ function getSecret() {
   return createHash("sha256").update(secret).digest();
 }
 
-function getRedirectUri(origin: string) {
-  return process.env.GOOGLE_REDIRECT_URI ?? `${origin}/api/gmail/callback`;
-}
-
-export function createGoogleOAuthClient(origin: string) {
+export function createGoogleOAuthClient(origin?: string): GoogleOAuthClient {
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
     throw new Error("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not configured.");
   }
-
-  return new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    getRedirectUri(origin),
-  );
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI ?? (origin ? `${origin}/api/gmail/callback` : undefined);
+  return new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, redirectUri);
 }
 
-export function getGmailAuthorizationUrl(client: ReturnType<typeof createGoogleOAuthClient>, state: string) {
+export function getGmailAuthorizationUrl(client: GoogleOAuthClient, state: string) {
   return client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent select_account",
     include_granted_scopes: false,
     response_type: "code",
     state,
-    scope: ["https://www.googleapis.com/auth/gmail.readonly"],
+    scope: [gmailReadonlyScope],
   });
 }
 
-export function encryptGmailToken(token: GmailToken) {
+/** Client that can refresh its own access tokens; refreshing needs the app's client credentials. */
+export function createAuthorizedClient(refreshToken: string) {
+  const client = createGoogleOAuthClient();
+  client.setCredentials({ refresh_token: refreshToken });
+  return client;
+}
+
+export function encryptSecret(value: string) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", getSecret(), iv);
-  const encrypted = Buffer.concat([cipher.update(JSON.stringify(token), "utf8"), cipher.final()]);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return [iv, cipher.getAuthTag(), encrypted].map((part) => part.toString("base64url")).join(".");
 }
 
-export function decryptGmailToken(value: string): GmailToken | null {
+export function decryptSecret(value: string): string | null {
   try {
     const [ivValue, tagValue, encryptedValue] = value.split(".");
     if (!ivValue || !tagValue || !encryptedValue) return null;
     const decipher = createDecipheriv("aes-256-gcm", getSecret(), Buffer.from(ivValue, "base64url"));
     decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
-    const decrypted = Buffer.concat([
-      decipher.update(Buffer.from(encryptedValue, "base64url")),
-      decipher.final(),
-    ]);
-    const token = JSON.parse(decrypted.toString("utf8")) as GmailToken;
-    return token.userId && token.accessToken ? token : null;
+    return Buffer.concat([decipher.update(Buffer.from(encryptedValue, "base64url")), decipher.final()]).toString("utf8");
   } catch {
     return null;
   }
 }
 
-export async function getGmailToken() {
-  const cookieStore = await cookies();
-  const value = cookieStore.get(gmailTokenCookie)?.value;
-  return value ? decryptGmailToken(value) : null;
-}
-
-export async function revokeGmailToken(token: GmailToken) {
-  const client = new google.auth.OAuth2();
-  await client.revokeToken(token.accessToken);
+/** Revoking the refresh token ends the whole grant, including any issued access tokens. */
+export async function revokeGoogleGrant(refreshToken: string) {
+  await createGoogleOAuthClient().revokeToken(refreshToken);
 }

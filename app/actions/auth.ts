@@ -2,8 +2,6 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { cookies } from "next/headers";
-import { gmailTokenCookie } from "@/lib/email/google-oauth";
 
 export type AuthState = {
   error?: string;
@@ -39,7 +37,6 @@ export async function login(
     return { error: error.message };
   }
 
-  
   redirect("/dashboard");
 }
 
@@ -106,7 +103,50 @@ export async function logout() {
   if (error) {
     throw new Error(error.message);
   }
-  const cookieStore = await cookies();
-  cookieStore.delete(gmailTokenCookie);
   redirect("/");
+}
+
+export async function requestPasswordReset(
+  _state: AuthState,
+  formData: FormData,
+): Promise<AuthState> {
+  const email = formData.get("email");
+  if (typeof email !== "string" || !email) {
+    return { error: "Enter your email address." };
+  }
+
+  const supabase = await createClient();
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: `${siteUrl}/auth/callback?next=/auth/update-password`,
+  });
+  if (error) console.error("Password reset request failed:", error.message);
+
+  // Same answer whether or not the account exists, so this can't be used to probe emails.
+  return { message: "If an account exists for that email, a reset link is on its way." };
+}
+
+export async function updatePassword(
+  _state: AuthState,
+  formData: FormData,
+): Promise<AuthState> {
+  const password = formData.get("password");
+  const confirmPassword = formData.get("confirmPassword");
+  if (typeof password !== "string" || typeof confirmPassword !== "string" || !password) {
+    return { error: "Enter a new password." };
+  }
+  if (password !== confirmPassword) {
+    return { error: "Passwords do not match." };
+  }
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    return { error: "Your reset link has expired. Request a new one." };
+  }
+  const { error } = await supabase.auth.updateUser({ password });
+  if (error) {
+    return { error: error.message };
+  }
+  redirect("/dashboard");
 }

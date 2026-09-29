@@ -1,61 +1,57 @@
-import { createGoogleOAuthClient, encryptGmailToken, gmailStateCookie, gmailTokenCookie } from "@/lib/email/google-oauth";
-import { createClient } from "@/lib/supabase/server";
+import { timingSafeEqual } from "node:crypto";
+import { createGmailClient, getGmailProfileEmail } from "@/lib/email/gmail";
+import { createGoogleOAuthClient, gmailReadonlyScope, gmailStateCookie, revokeGoogleGrant } from "@/lib/email/google-oauth";
+import { getAuthedContext, saveGmailConnection } from "@/lib/email/store";
 import { cookies } from "next/headers";
-import { google } from "googleapis";
 import { NextResponse } from "next/server";
+
+function statesMatch(received: string | null, saved: string | undefined) {
+  if (!received || !saved || received.length !== saved.length) return false;
+  return timingSafeEqual(Buffer.from(received), Buffer.from(saved));
+}
 
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const redirectTo = new URL("/connect-email", requestUrl.origin);
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const fail = (code: string) => {
+    redirectTo.searchParams.set("error", code);
+    return NextResponse.redirect(redirectTo);
+  };
+
+  const context = await getAuthedContext();
   const cookieStore = await cookies();
   const savedState = cookieStore.get(gmailStateCookie)?.value;
+  cookieStore.delete({ name: gmailStateCookie, path: "/api/gmail/callback" });
+
+  if (!context) return NextResponse.redirect(new URL("/auth/login", requestUrl.origin));
   const state = requestUrl.searchParams.get("state");
-  cookieStore.delete(gmailStateCookie);
-
-  if (!user) return NextResponse.redirect(new URL("/auth/login", requestUrl.origin));
-  if (!state || !savedState || state !== savedState) {
-    redirectTo.searchParams.set("error", "The Gmail connection request expired. Please try again.");
-    return NextResponse.redirect(redirectTo);
-  }
-
-  const error = requestUrl.searchParams.get("error");
-  if (error) {
-    redirectTo.searchParams.set("error", error === "access_denied" ? "Gmail access was not granted." : error);
-    return NextResponse.redirect(redirectTo);
-  }
+  if (!statesMatch(state, savedState) || !state?.endsWith(`.${context.user.id}`)) return fail("expired");
+  if (requestUrl.searchParams.get("error")) return fail(requestUrl.searchParams.get("error") === "access_denied" ? "denied" : "failed");
 
   const code = requestUrl.searchParams.get("code");
-  if (!code) {
-    redirectTo.searchParams.set("error", "Google did not return an authorization code.");
-    return NextResponse.redirect(redirectTo);
-  }
+  if (!code) return fail("failed");
 
+  let refreshToken: string | undefined;
   try {
-    const client = createGoogleOAuthClient(requestUrl.origin);
-    const { tokens } = await client.getToken(code);
-    if (!tokens.access_token) throw new Error("Google did not return a Gmail access token.");
-    const gmail = google.gmail({ version: "v1", auth: client });
-    client.setCredentials(tokens);
-    const profile = await gmail.users.getProfile({ userId: "me" });
+    const { tokens } = await createGoogleOAuthClient(requestUrl.origin).getToken(code);
+    refreshToken = tokens.refresh_token ?? undefined;
+    // Google's granular consent lets people untick Gmail; don't store a grant without it.
+    const scopes = tokens.scope?.split(" ") ?? [];
+    if (!scopes.includes(gmailReadonlyScope)) {
+      if (refreshToken) await revokeGoogleGrant(refreshToken).catch(() => undefined);
+      return fail("scope");
+    }
+    if (!refreshToken) return fail("failed");
 
-    cookieStore.set(gmailTokenCookie, encryptGmailToken({
-      userId: user.id,
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token ?? undefined,
-      email: profile.data.emailAddress ?? undefined,
-    }), {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 60 * 60 * 24 * 30,
-      path: "/",
-    });
-    redirectTo.searchParams.set("connected", "true");
+    const googleEmail = await getGmailProfileEmail(createGmailClient(refreshToken));
+    if (!googleEmail) throw new Error("Gmail profile had no email address.");
+    await saveGmailConnection(context, { googleEmail, refreshToken, scopes: scopes.join(" ") });
   } catch (error) {
-    redirectTo.searchParams.set("error", error instanceof Error ? error.message : "Unable to connect Gmail.");
+    console.error("[gmail callback] failed:", error instanceof Error ? error.message : "unknown error");
+    if (refreshToken) await revokeGoogleGrant(refreshToken).catch(() => undefined);
+    return fail("failed");
   }
 
+  redirectTo.searchParams.set("connected", "true");
   return NextResponse.redirect(redirectTo);
 }

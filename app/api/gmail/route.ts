@@ -1,54 +1,41 @@
-import { getGmailApiError, getGmailInfo } from "@/lib/email/gmail";
-import { classifySenderGroups } from "@/lib/email/classifier";
-import { getGmailToken, gmailTokenCookie } from "@/lib/email/google-oauth";
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
+import { buildSenderGroups, getScanStats, toSenderSummary } from "@/lib/email/classifier";
+import { createGmailClient, getRecentCorrespondents, scanMailbox } from "@/lib/email/gmail";
+import { handleRouteError, jsonError } from "@/lib/email/route-helpers";
+import { getAuthedContext, getGmailConnection, getLatestActionsBySender, listSenderRules, saveScanStats } from "@/lib/email/store";
 import { NextResponse } from "next/server";
 
+export const maxDuration = 60;
+
+const minScanIntervalMs = 15_000;
+
 export async function GET() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const gmailToken = await getGmailToken();
-
-  if (!user) {
-    return NextResponse.json(
-      { error: "Please sign in to view your inbox." },
-      { status: 401 },
-    );
-  }
-
-  if (!gmailToken || gmailToken.userId !== user.id) {
-    return NextResponse.json(
-      { error: "Gmail is not connected" },
-      { status: 400 },
-    );
-  }
+  const context = await getAuthedContext();
+  if (!context) return jsonError("Please sign in to view your inbox.", 401);
 
   try {
-    const messages = await getGmailInfo(gmailToken);
-    const groups = classifySenderGroups(messages);
+    const connection = await getGmailConnection(context);
+    if (!connection) return jsonError("Gmail is not connected.", 400, { gmailConnected: false });
+    if (connection.lastScanAt && Date.now() - Date.parse(connection.lastScanAt) < minScanIntervalMs) {
+      return jsonError("A scan just finished. Please wait a few seconds before scanning again.", 429);
+    }
+
+    const gmail = createGmailClient(connection.refreshToken);
+    const [{ messages, capped }, correspondents, rules, latestActions] = await Promise.all([
+      scanMailbox(gmail),
+      getRecentCorrespondents(gmail),
+      listSenderRules(context),
+      getLatestActionsBySender(context),
+    ]);
+    const groups = buildSenderGroups(messages, { rules, correspondents });
+    const stats = getScanStats(groups, capped);
+    await saveScanStats(context, stats);
+
     return NextResponse.json({
-      messages: groups.flatMap((group) => group.emails),
-      groups,
+      stats,
+      rules,
+      senders: groups.map((group) => ({ ...toSenderSummary(group), lastAction: latestActions.get(group.key) ?? null })),
     });
   } catch (error) {
-    const gmailError = getGmailApiError(error);
-    const authorizationError = gmailError.status === 401 || gmailError.status === 403 || (gmailError.status === 400 && /authorization|invalid_grant|scope|credential/i.test(gmailError.message)) || /invalid_grant|insufficient.*scope|authentication scope|unauthorized/i.test(gmailError.message);
-    if (authorizationError) {
-      const cookieStore = await cookies();
-      cookieStore.delete(gmailTokenCookie);
-      return NextResponse.json(
-        { error: "Gmail authorization expired or was revoked. Please reconnect Gmail.", gmailConnected: false },
-        { status: 401 },
-      );
-    }
-    return NextResponse.json(
-      {
-        error: `Gmail request failed${gmailError.status ? ` (${gmailError.status})` : ""}: ${gmailError.message}`,
-      },
-      { status: 502 },
-    );
+    return handleRouteError(error, context, "scan your inbox");
   }
 }

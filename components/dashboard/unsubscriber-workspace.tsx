@@ -2,775 +2,386 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import {
-  ArrowLeft,
-  ArrowRight,
-  Archive,
-  BarChart3,
-  Ban,
-  CalendarDays,
-  Check,
-  ChevronDown,
-  Clock3,
-  Inbox,
-  LayoutDashboard,
-  MailOpen,
-  Menu,
-  ChevronRight,
-  Filter,
-  Settings,
-  ShieldCheck,
-  Sparkles,
-  Tag,
-  MailPlus,
-  X,
-} from "lucide-react";
+import { Ban, ChevronRight, EyeOff, Filter, Loader2, RefreshCw, ShieldCheck, ShieldOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { logout } from "@/app/actions/auth";
-import type { GmailMessage } from "@/lib/email/gmail.ts";
-import type { ClassifiedEmail, Classification } from "@/lib/email/classifier";
+import type { Classification, ScanStats, SenderRule, SenderSummary } from "@/lib/email/classifier";
+import type { UnsubscribeStatus } from "@/lib/email/store";
+import { formatDate, methodLabels, statusLabels } from "./status";
 
-type UnsubscriberWorkspaceProps = {
-  email: string;
+type Sender = SenderSummary & { lastAction: { id: string; status: UnsubscribeStatus; createdAt: string } | null };
+type Tab = Classification | "ignored";
+type UnsubscribeResult = { status: UnsubscribeStatus; detail: string; manualUrl?: string; mailto?: string };
+
+const tabs: Array<{ id: Tab; label: string; empty: string }> = [
+  { id: "subscription", label: "Subscriptions", empty: "No subscriptions found in recent email." },
+  { id: "review", label: "Needs review", empty: "Nothing needs review." },
+  { id: "protected", label: "Protected", empty: "No protected senders yet." },
+  { id: "ignored", label: "Ignored", empty: "You haven't ignored any senders." },
+];
+const pageSize = 25;
+
+const classificationStyles: Record<Classification, string> = {
+  subscription: "bg-emerald-100 text-emerald-800",
+  protected: "bg-amber-100 text-amber-800",
+  review: "bg-gray-100 text-gray-600",
 };
 
-const navItems = [
-  { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
-  {
-    label: "Unsubscriber",
-    href: "/features/unsubscriber",
-    icon: Inbox,
-    active: true,
-  },
-  { label: "Analytics", href: "/features/inbox-analytics", icon: BarChart3 },
-  { label: "History", href: "/features/history", icon: Clock3 },
-];
-
-function Sidebar({ onClose }: { onClose?: () => void }) {
-  return (
-    <aside className="flex h-screen w-64 shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-white px-4 py-5 lg:fixed lg:inset-y-0 lg:left-0 lg:z-40">
-      <div className="flex items-center justify-between px-2">
-        <Link href="/" className="flex items-center gap-2" onClick={onClose}>
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-white shadow-sm shadow-purple-200">
-            <Inbox className="h-5 w-5" />
-          </span>
-          <span className="text-xl font-bold tracking-tight text-gray-950">
-            Kick<span className="text-primary">Ads</span>
-          </span>
-        </Link>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 lg:hidden"
-            aria-label="Close navigation"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        )}
-      </div>
-      <div className="mt-9 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-400">
-        Workspace
-      </div>
-      <nav className="mt-3 space-y-1">
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          return (
-            <Link
-              key={item.label}
-              href={item.href}
-              onClick={onClose}
-              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${item.active ? "bg-purple-50 text-primary" : "text-gray-600 hover:bg-gray-50 hover:text-gray-950"}`}
-            >
-              <Icon className="h-4 w-4" />
-              {item.label}
-            </Link>
-          );
-        })}
-      </nav>
-      <div className="mt-8 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-400">
-        Manage
-      </div>
-      <nav className="mt-3 space-y-1">
-        <Link
-          href="/connect-email"
-          onClick={onClose}
-          className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-950"
-        >
-          <MailPlus className="h-4 w-4" />
-          Connect email
-        </Link>
-        <Link
-          href="/learn/how-data-is-being-used"
-          onClick={onClose}
-          className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-950"
-        >
-          <ShieldCheck className="h-4 w-4" />
-          Privacy & data
-        </Link>
-        <Link
-          href="/learn/how-it-works"
-          onClick={onClose}
-          className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-950"
-        >
-          <Sparkles className="h-4 w-4" />
-          Help center
-        </Link>
-      </nav>
-      <div className="mt-auto rounded-2xl bg-gray-50 p-4">
-        <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-          <Sparkles className="h-4 w-4 text-primary" />
-          Free plan
-        </div>
-        <p className="mt-2 text-xs leading-5 text-gray-500">
-          42 of 50 cleanup actions used this month.
-        </p>
-        <Link
-          href="/#pricing"
-          onClick={onClose}
-          className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary hover:text-purple-800"
-        >
-          Upgrade plan <ArrowRight className="h-3.5 w-3.5" />
-        </Link>
-      </div>
-    </aside>
-  );
+function ruleMatches(rule: SenderRule, sender: Sender) {
+  return rule.matchType === "address"
+    ? rule.value === sender.address
+    : sender.domain === rule.value || sender.domain.endsWith(`.${rule.value}`);
 }
 
-export function UnsubscriberWorkspace({ email }: UnsubscriberWorkspaceProps) {
-  const [messages, setMessages] = useState<ClassifiedEmail[]>([]);
-  const [gmailConnected, setGmailConnected] = useState(false);
-  const [isCheckingConnection, setIsCheckingConnection] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
-  const [loadError, setLoadError] = useState("");
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [filter, setFilter] = useState("");
-  const [expandedSender, setExpandedSender] = useState<string | null>(null);
-  const [page, setPage] = useState(1);
-  const [actionedSenders, setActionedSenders] = useState<
-    Record<string, "kept" | "unsubscribed">
-  >({});
+function tabOf(sender: Sender): Tab {
+  return sender.ignored ? "ignored" : sender.classification;
+}
 
-  async function loadMessages() {
-    setIsLoading(true);
-    setLoadError("");
-    setNotice("");
+export function UnsubscriberWorkspace() {
+  const [gmail, setGmail] = useState<{ checked: boolean; email: string | null }>({ checked: false, email: null });
+  const [senders, setSenders] = useState<Sender[]>([]);
+  const [rules, setRules] = useState<SenderRule[]>([]);
+  const [stats, setStats] = useState<ScanStats | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState<Tab>("subscription");
+  const [filter, setFilter] = useState("");
+  const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, UnsubscribeResult>>({});
+
+  async function scan() {
+    setIsScanning(true);
+    setError("");
     try {
       const response = await fetch("/api/gmail");
       const data = await response.json();
-      if (response.status === 401) {
-        setGmailConnected(false);
-        setMessages([]);
-      }
-      if (!response.ok)
-        throw new Error(data.error ?? "Unable to read Gmail messages.");
-      setMessages(data.messages ?? []);
+      if (data.gmailConnected === false) setGmail({ checked: true, email: null });
+      if (!response.ok) throw new Error(data.error ?? "Could not scan your inbox.");
+      setSenders(data.senders);
+      setRules(data.rules);
+      setStats(data.stats);
       setPage(1);
-    } catch (error) {
-      setLoadError(
-        error instanceof Error
-          ? error.message
-          : "Unable to read Gmail messages.",
-      );
+    } catch (scanError) {
+      setError(scanError instanceof Error ? scanError.message : "Could not scan your inbox.");
     } finally {
-      setIsLoading(false);
+      setIsScanning(false);
     }
   }
 
   useEffect(() => {
-    async function checkConnection() {
+    async function start() {
       try {
         const response = await fetch("/api/gmail/status");
         const data = await response.json();
-        if (!response.ok)
-          throw new Error(data.error ?? "Unable to check Gmail connection.");
-        const connected = data.gmailConnected === true;
-        setGmailConnected(connected);
-        if (connected) void loadMessages();
-      } catch (error) {
-        setLoadError(
-          error instanceof Error
-            ? error.message
-            : "Unable to check Gmail connection.",
-        );
-      } finally {
-        setIsCheckingConnection(false);
+        if (!response.ok) throw new Error(data.error ?? "Could not check the Gmail connection.");
+        setGmail({ checked: true, email: data.gmailConnected ? data.email : null });
+        if (data.gmailConnected) await scan();
+      } catch (statusError) {
+        setGmail({ checked: true, email: null });
+        setError(statusError instanceof Error ? statusError.message : "Could not check the Gmail connection.");
       }
     }
-
-    void checkConnection();
+    void start();
   }, []);
 
-  async function disconnectGmail() {
-    await fetch("/api/gmail/disconnect", { method: "POST" });
-    setGmailConnected(false);
-    setMessages([]);
-    setPage(1);
-    setActionedSenders({});
-    setNotice("Gmail disconnected. No more email data will be requested.");
-  }
+  const counts = useMemo(() => {
+    const result: Record<Tab, number> = { subscription: 0, review: 0, protected: 0, ignored: 0 };
+    for (const sender of senders) result[tabOf(sender)] += 1;
+    return result;
+  }, [senders]);
 
-  const filteredMessages = useMemo(
-    () =>
-      messages.filter((message) => {
-        const searchText = `${message.sender.displayName} ${message.sender.email} ${message.sender.domain}`;
-        return searchText.toLowerCase().includes(filter.toLowerCase());
-      }),
-    [filter, messages],
-  );
-  const groupedMessages = useMemo(() => {
-    const groups = new Map<string, ClassifiedEmail[]>();
-    for (const message of filteredMessages) {
-      const key = message.sender.domain;
-      groups.set(key, [...(groups.get(key) ?? []), message]);
-    }
-    return [...groups.entries()].map(([key, senderMessages]) => ({
-      key,
-      messages: senderMessages,
+  const visible = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    return senders.filter((sender) => tabOf(sender) === tab && (!query || `${sender.displayName} ${sender.address} ${sender.domain}`.toLowerCase().includes(query)));
+  }, [senders, tab, filter]);
+  const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
+  const pageItems = visible.slice((page - 1) * pageSize, page * pageSize);
+
+  /** Applies a rule change locally; the server re-checks everything before any unsubscribe. */
+  function applyRules(nextRules: SenderRule[]) {
+    setRules(nextRules);
+    setSenders((current) => current.map((sender) => {
+      const protect = nextRules.find((rule) => rule.kind === "protect" && ruleMatches(rule, sender));
+      const ignore = nextRules.find((rule) => rule.kind === "ignore" && ruleMatches(rule, sender));
+      if (protect) {
+        return { ...sender, classification: "protected", protectedBy: protect.matchType, ignored: false, execution: "none", reasons: [`You protected this ${protect.matchType === "domain" ? "domain" : "sender"}`] };
+      }
+      if (sender.protectedBy) {
+        // The original classification isn't known without a rescan, so fall back to the cautious option.
+        return { ...sender, classification: "review", protectedBy: null, ignored: Boolean(ignore), reasons: ["Protection removed. Rescan to classify this sender again."] };
+      }
+      return { ...sender, ignored: Boolean(ignore) };
     }));
-  }, [filteredMessages]);
-  const pageCount = Math.max(1, Math.ceil(groupedMessages.length / 20));
-  const pagedGroups = groupedMessages.slice((page - 1) * 20, page * 20);
-
-  function updateFilter(value: string) {
-    setFilter(value);
-    setPage(1);
-    setExpandedSender(null);
   }
 
-  async function handleSenderAction(groupKey: string, senderEmail: string, action: "kept" | "unsubscribed") {
-    if (action === "unsubscribed") {
-      const confirmed = window.confirm(`Unsubscribe from ${senderEmail}? This requires explicit confirmation.`);
-      if (!confirmed) return;
-      setNotice(`${senderEmail} is prepared as an unsubscribe candidate. No request was sent.`);
+  async function changeRule(sender: Sender, kind: SenderRule["kind"], matchType: SenderRule["matchType"], enable: boolean) {
+    setBusy(sender.key);
+    setError("");
+    try {
+      const value = matchType === "address" ? sender.address : sender.domain;
+      const existing = rules.find((rule) => rule.kind === kind && rule.matchType === matchType && ruleMatches(rule, sender));
+      const response = enable
+        ? await fetch("/api/rules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, matchType, value }) })
+        : await fetch(`/api/rules?id=${encodeURIComponent(existing?.id ?? "")}`, { method: "DELETE" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Could not update the sender rule.");
+      applyRules(data.rules);
+    } catch (ruleError) {
+      setError(ruleError instanceof Error ? ruleError.message : "Could not update the sender rule.");
+    } finally {
+      setBusy(null);
     }
-    setActionedSenders((current) => ({ ...current, [groupKey]: action }));
-    setNotice(
-      `${senderEmail} marked to ${action === "kept" ? "keep" : "unsubscribe"}.`,
-    );
+  }
+
+  async function unsubscribe(sender: Sender) {
+    setBusy(sender.key);
+    setConfirming(null);
+    try {
+      const response = await fetch("/api/gmail/unsubscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: sender.key, confirmed: true, acknowledgeReview: sender.classification === "review" }),
+      });
+      const data = await response.json();
+      if (data.gmailConnected === false) setGmail({ checked: true, email: null });
+      const result: UnsubscribeResult = response.ok
+        ? { status: data.status, detail: data.detail, manualUrl: data.manualUrl, mailto: data.mailto }
+        : { status: "failed", detail: data.error ?? "The unsubscribe request failed." };
+      setResults((current) => ({ ...current, [sender.key]: result }));
+    } catch {
+      setResults((current) => ({ ...current, [sender.key]: { status: "failed", detail: "The unsubscribe request failed. Check your connection and try again." } }));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!gmail.checked) {
+    return <p className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="h-4 w-4 animate-spin" /> Checking your Gmail connection...</p>;
   }
 
   return (
-    <div className="min-h-screen bg-[#f8f8fb] text-gray-950">
-      <div className="flex min-h-screen">
-        <div className="hidden lg:block">
-          <Sidebar />
+    <>
+      <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-gray-950 sm:text-4xl">Subscriptions</h1>
+          <p className="mt-2 max-w-2xl text-gray-600">
+            Senders who emailed you in the last 6 months, grouped by address. Nothing is unsubscribed unless you choose it.
+          </p>
         </div>
-        {mobileNavOpen && (
-          <div className="fixed inset-0 z-50 flex lg:hidden">
-            <button
-              type="button"
-              className="absolute inset-0 bg-gray-950/30"
-              onClick={() => setMobileNavOpen(false)}
-              aria-label="Close navigation"
-            />
-            <div className="relative z-10 h-full">
-              <Sidebar onClose={() => setMobileNavOpen(false)} />
-            </div>
-          </div>
+        {gmail.email && (
+          <Button type="button" variant="outline" onClick={scan} disabled={isScanning} className="h-10 gap-2 rounded-lg">
+            <RefreshCw className={`h-4 w-4 ${isScanning ? "animate-spin" : ""}`} /> {isScanning ? "Scanning..." : "Rescan"}
+          </Button>
         )}
-        <div className="min-w-0 flex-1 lg:ml-64">
-          <header className="flex h-18 items-center justify-between border-b border-gray-200 bg-white px-4 sm:px-8">
-            <div className="flex items-center gap-3">
+      </div>
+
+      {error && <p className="mt-6 rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-700" role="alert">{error}</p>}
+
+      {!gmail.email ? (
+        <section className="mt-8 rounded-2xl border border-purple-200 bg-purple-50 p-6">
+          <h2 className="text-lg font-semibold text-gray-950">Connect your Gmail</h2>
+          <p className="mt-1 text-sm text-gray-600">Signing in doesn&apos;t give us access to your email. Connect Gmail separately to find subscriptions.</p>
+          <Link href="/connect-email" className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-white hover:bg-purple-800">Connect Gmail</Link>
+        </section>
+      ) : (
+        <section className="mt-8 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+          <div className="flex flex-wrap gap-1 border-b border-gray-200 p-2">
+            {tabs.map((item) => (
               <button
+                key={item.id}
                 type="button"
-                onClick={() => setMobileNavOpen(true)}
-                className="rounded-lg p-2 text-gray-600 hover:bg-gray-100 lg:hidden"
-                aria-label="Open navigation"
+                onClick={() => { setTab(item.id); setPage(1); setExpanded(null); }}
+                className={`rounded-lg px-3 py-2 text-sm font-medium ${tab === item.id ? "bg-purple-50 text-primary" : "text-gray-600 hover:bg-gray-50"}`}
               >
-                <Menu className="h-5 w-5" />
+                {item.label} <span className="ml-1 text-xs text-gray-400">{counts[item.id]}</span>
               </button>
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.14em] text-gray-400">
-                  Workspace
-                </p>
-                <p className="text-sm font-semibold text-gray-900">
-                  Unsubscriber
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 sm:gap-3">
-              <span className="hidden text-sm text-gray-500 sm:block">
-                {email}
-              </span>
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-sm font-semibold text-primary">
-                {email.charAt(0).toUpperCase()}
-              </span>
-              <ChevronDown className="h-4 w-4 text-gray-400" />
-            </div>
-          </header>
-
-          <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8 lg:py-10">
-            <Link
-              href="/dashboard"
-              className="inline-flex items-center gap-2 text-sm font-medium text-gray-500 hover:text-primary"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Back to overview
-            </Link>
-            <div className="mt-7 flex flex-col justify-between gap-5 md:flex-row md:items-end">
-              <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-primary">
-                  Inbox cleanup
-                </p>
-                <h1 className="mt-2 text-3xl font-bold tracking-tight text-gray-950 sm:text-4xl">
-                  Unsubscribe from the noise.
-                </h1>
-                <p className="mt-2 max-w-2xl text-gray-600">
-                  Find recent emails with clear unsubscribe options, then choose
-                  what to do.
-                </p>
-              </div>
-              <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm shadow-sm">
-                <ShieldCheck className="h-5 w-5 text-emerald-600" />
-                <div>
-                  <p className="font-semibold text-gray-900">
-                    {gmailConnected ? "Gmail connected" : "Gmail not connected"}
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    {gmailConnected
-                      ? "Ready when you are"
-                      : "Connect to find unsubscribe options"}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {notice && (
-              <div
-                role="status"
-                className="mt-6 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800"
-              >
-                <Check className="h-5 w-5 shrink-0 text-emerald-600" />
-                {notice}
-                <button
-                  type="button"
-                  onClick={() => setNotice("")}
-                  className="ml-auto text-emerald-600 hover:text-emerald-900"
-                  aria-label="Dismiss notice"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            )}
-
-            {!isCheckingConnection && !gmailConnected && (
-              <section className="mt-8 rounded-2xl border border-purple-200 bg-purple-50 p-6">
-                <h2 className="text-lg font-semibold text-gray-950">
-                  Connect your Gmail
-                </h2>
-                <p className="mt-1 text-sm text-gray-600">
-                  Connect Gmail to find emails with unsubscribe options.
-                </p>
-                <Link
-                  href="/connect-email"
-                  className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-white hover:bg-purple-800"
-                >
-                  Connect Gmail
-                </Link>
-              </section>
-            )}
-
-            {gmailConnected && (
-              <InboxReviewPanel
-                filter={filter}
-                onFilterChange={updateFilter}
-                onDisconnect={disconnectGmail}
-                isLoading={isLoading}
-                loadError={loadError}
-                messages={messages}
-                groupedMessages={pagedGroups}
-                totalGroups={groupedMessages.length}
-                page={page}
-                pageCount={pageCount}
-                onPageChange={(nextPage) => {
-                  setPage(nextPage);
-                  setExpandedSender(null);
-                }}
-                expandedSender={expandedSender}
-                actionedSenders={actionedSenders}
-                onToggleSender={(sender) =>
-                  setExpandedSender((current) =>
-                    current === sender ? null : sender,
-                  )
-                }
-                onSenderAction={handleSenderAction}
+            ))}
+          </div>
+          <div className="flex flex-col gap-3 border-b border-gray-200 p-3 sm:flex-row sm:items-center">
+            <label className="relative min-w-0 flex-1">
+              <Filter className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+              <input
+                value={filter}
+                onChange={(event) => { setFilter(event.target.value); setPage(1); }}
+                placeholder="Filter senders"
+                className="h-10 w-full rounded-lg border border-gray-200 bg-gray-50 pl-9 pr-3 text-sm text-gray-800 outline-none focus:border-primary focus:bg-white"
               />
-            )}
+            </label>
+            <span className="text-sm text-gray-500">
+              {stats ? `${stats.analyzed} emails from ${stats.senders} senders${stats.capped ? " (most recent only)" : ""} · ${gmail.email}` : gmail.email}
+            </span>
+          </div>
 
-            <div className="mt-6 flex items-start gap-3 rounded-2xl border border-purple-100 bg-purple-50/70 p-4 text-sm text-purple-900">
-              <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-              <p>
-                <span className="font-semibold">How this works:</span> KickAds
-                groups messages by sender so you can make one clear decision
-                instead of handling every email individually.
-              </p>
-            </div>
-            <div className="mt-8 flex items-center justify-between border-t border-gray-200 pt-6">
-              <div className="flex items-center gap-2 text-xs text-gray-500">
-                <Settings className="h-4 w-4" />
-                Gmail access is read-only and only used after you connect it.
+          {isScanning && !senders.length && (
+            <p className="flex items-center justify-center gap-2 p-12 text-sm text-gray-500"><Loader2 className="h-4 w-4 animate-spin" /> Scanning your inbox. Large mailboxes can take up to a minute.</p>
+          )}
+          {!isScanning && !pageItems.length && <p className="p-12 text-center text-sm text-gray-500">{tabs.find((item) => item.id === tab)?.empty}</p>}
+
+          <div className="divide-y divide-gray-200">
+            {pageItems.map((sender) => (
+              <SenderRow
+                key={sender.key}
+                sender={sender}
+                expanded={expanded === sender.key}
+                confirming={confirming === sender.key}
+                busy={busy === sender.key}
+                result={results[sender.key]}
+                onToggle={() => setExpanded((current) => (current === sender.key ? null : sender.key))}
+                onStartUnsubscribe={() => setConfirming(sender.key)}
+                onCancelUnsubscribe={() => setConfirming(null)}
+                onUnsubscribe={() => unsubscribe(sender)}
+                onRule={(kind, matchType, enable) => changeRule(sender, kind, matchType, enable)}
+              />
+            ))}
+          </div>
+
+          {pageCount > 1 && (
+            <div className="flex items-center justify-between border-t border-gray-200 px-5 py-4 text-sm text-gray-500">
+              <span>Page {page} of {pageCount}</span>
+              <div className="flex gap-1">
+                <button type="button" onClick={() => setPage(page - 1)} disabled={page === 1} className="rounded-lg px-3 py-1.5 hover:bg-gray-100 disabled:opacity-40">Prev</button>
+                <button type="button" onClick={() => setPage(page + 1)} disabled={page === pageCount} className="rounded-lg px-3 py-1.5 hover:bg-gray-100 disabled:opacity-40">Next</button>
               </div>
-              <form action={logout}>
-                <Button
-                  type="submit"
-                  variant="outline"
-                  className="border-gray-200 text-gray-600 hover:text-gray-950"
-                >
-                  Log out
-                </Button>
-              </form>
             </div>
-          </main>
-        </div>
-      </div>
-    </div>
+          )}
+        </section>
+      )}
+
+      <p className="mt-6 text-xs text-gray-500">
+        Gmail access is read-only. Only sender details and subjects are shown; email bodies are never stored.
+      </p>
+    </>
   );
 }
 
-function getMessageHeader(message: GmailMessage, name: string) {
-  return (
-    message.headers.find(
-      (header) => header.name.toLowerCase() === name.toLowerCase(),
-    )?.value ?? ""
-  );
-}
-
-function InboxReviewPanel({
-  filter,
-  onFilterChange,
-  onDisconnect,
-  isLoading,
-  loadError,
-  messages,
-  groupedMessages,
-  totalGroups,
-  page,
-  pageCount,
-  onPageChange,
-  expandedSender,
-  actionedSenders,
-  onToggleSender,
-  onSenderAction,
-}: {
-  filter: string;
-  onFilterChange: (value: string) => void;
-  onDisconnect: () => void;
-  isLoading: boolean;
-  loadError: string;
-  messages: ClassifiedEmail[];
-  groupedMessages: Array<{ key: string; messages: ClassifiedEmail[] }>;
-  page: number;
-  pageCount: number;
-  onPageChange: (page: number) => void;
-  expandedSender: string | null;
-  actionedSenders: Record<string, "kept" | "unsubscribed">;
-  totalGroups: number;
-  onToggleSender: (sender: string) => void;
-  onSenderAction: (groupKey: string, senderEmail: string, action: "kept" | "unsubscribed") => void;
-}) {
-  const shownStart = groupedMessages.length ? (page - 1) * 20 + 1 : 0;
-  const shownEnd = Math.min(page * 20, totalGroups);
-  return (
-    <section className="mt-8 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
-      <div className="flex flex-col gap-3 border-b border-gray-200 bg-white p-3 sm:flex-row sm:items-center">
-        <label className="relative min-w-0 flex-1">
-          <Filter className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
-          <input
-            value={filter}
-            onChange={(event) => onFilterChange(event.target.value)}
-            placeholder="Filter senders"
-            className="h-10 w-full rounded-lg border border-gray-200 bg-gray-50 pl-9 pr-3 text-sm text-gray-800 outline-none transition focus:border-primary focus:bg-white"
-          />
-        </label>
-        <span className="text-sm text-gray-500">
-          {messages.length} messages loaded across {totalGroups} domains
-        </span>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={onDisconnect}
-          className="h-10 rounded-lg"
-        >
-          Disconnect
-        </Button>
-      </div>
-      <div className="border-b border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-950">
-        <p className="font-semibold">Only connected Gmail data appears here.</p>
-          <p className="mt-0.5 text-amber-900/75">
-            Only emails received in the last 3 months are included. Domains are shown 20 per page. Nothing is loaded automatically from Google sign-in.
-        </p>
-      </div>
-      {loadError && (
-        <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {loadError}
-        </div>
-      )}
-      {!isLoading && !loadError && !messages.length && (
-        <div className="p-12 text-center text-sm text-gray-500">
-          Gmail messages will appear here once loading finishes.
-        </div>
-      )}
-      <div className="divide-y divide-gray-200">
-          {groupedMessages.map((group) => (
-          <SenderGroup
-            key={group.key}
-            messages={group.messages}
-            expanded={expandedSender === group.key}
-            action={actionedSenders[group.key]}
-            onToggle={() => onToggleSender(group.key)}
-            onAction={(senderEmail, nextAction) => onSenderAction(group.key, senderEmail, nextAction)}
-          />
-        ))}
-      </div>
-      {totalGroups > 0 && (
-        <Pagination
-          page={page}
-          pageCount={pageCount}
-          shownStart={shownStart}
-          shownEnd={shownEnd}
-          totalCount={totalGroups}
-          onPageChange={onPageChange}
-        />
-      )}
-    </section>
-  );
-}
-
-function SenderGroup({
-  messages,
-  expanded,
-  action,
-  onToggle,
-  onAction,
-}: {
-  messages: ClassifiedEmail[];
+function SenderRow({ sender, expanded, confirming, busy, result, onToggle, onStartUnsubscribe, onCancelUnsubscribe, onUnsubscribe, onRule }: {
+  sender: Sender;
   expanded: boolean;
-  action?: "kept" | "unsubscribed";
+  confirming: boolean;
+  busy: boolean;
+  result?: UnsubscribeResult;
   onToggle: () => void;
-  onAction: (senderEmail: string, action: "kept" | "unsubscribed") => void;
+  onStartUnsubscribe: () => void;
+  onCancelUnsubscribe: () => void;
+  onUnsubscribe: () => void;
+  onRule: (kind: SenderRule["kind"], matchType: SenderRule["matchType"], enable: boolean) => void;
 }) {
-  const domain = messages[0].sender.domain;
-  const senderName = domain;
-  const senderAddresses = [...new Set(messages.map((message) => message.sender.email))];
-  const senderAddress = senderAddresses.length === 1 ? senderAddresses[0] : `${senderAddresses.length} sender addresses`;
-  const initials = (senderName || senderAddress)
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
-  const isProtected = messages.some((message) => message.isProtected);
-  const isSubscription = messages.some((message) => message.classification === "subscription");
-  const unsubscribeAvailable = senderAddresses.length === 1 && !isProtected && isSubscription && messages.some((message) => message.unsubscribeAvailable && message.unsubscribe?.method === "one_click");
-  const classification: Classification = isProtected && isSubscription ? "review" : isProtected ? "protected" : isSubscription ? "subscription" : "review";
-  const lastReceivedAt = messages.map((message) => message.date).filter(Boolean).sort().at(-1);
-  const dateLabel = lastReceivedAt ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(lastReceivedAt)) : "Date unavailable";
+  const canUnsubscribe = sender.classification !== "protected" && sender.execution !== "none";
+  const lastStatus = result?.status ?? sender.lastAction?.status;
+  const actionClass = "inline-flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40";
+
   return (
-    <div>
-      <div className="flex items-center gap-3 px-5 py-4 transition-colors hover:bg-gray-50 sm:px-6">
-        <button
-          type="button"
-          onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-4 text-left"
-        >
-          <ChevronRight
-            className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${expanded ? "rotate-90" : ""}`}
-          />
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-sm font-bold text-orange-700">
-            {initials}
-          </span>
+    <div className="px-5 py-4 sm:px-6">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-3 text-left" aria-expanded={expanded}>
+          <ChevronRight className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${expanded ? "rotate-90" : ""}`} />
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-2">
-              <span className="truncate text-base font-semibold text-gray-900">
-                {senderName || "Unknown sender"}
+              <span className="truncate text-base font-semibold text-gray-900">{sender.displayName}</span>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${classificationStyles[sender.classification]}`}>
+                {sender.classification === "review" ? "needs review" : sender.classification}
               </span>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${classification === "protected" ? "bg-amber-100 text-amber-800" : classification === "subscription" ? "bg-emerald-100 text-emerald-800" : "bg-gray-100 text-gray-500"}`}>
-                {classification}
-              </span>
+              {lastStatus && <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusLabels[lastStatus].className}`}>{statusLabels[lastStatus].label}</span>}
             </span>
-            <span className="mt-1 block truncate text-xs text-gray-500">
-              {senderAddress}
+            <span className="mt-1 block truncate text-xs text-gray-500">{sender.address || "Unreadable sender"}{sender.listId ? ` · list ${sender.listId}` : ""}</span>
+            <span className="mt-1 block text-[11px] text-gray-400">
+              {sender.emailCount} email{sender.emailCount === 1 ? "" : "s"} · last {formatDate(sender.lastReceivedAt)} · {sender.execution === "automatic" ? "One-click unsubscribe" : sender.execution === "manual" ? `${methodLabels[sender.unsubscribeMethod]} (you finish it)` : "No unsubscribe option"}
             </span>
-            <span className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
-              <span>{classification === "protected" ? "Protected from unsubscribe" : classification === "subscription" ? "Subscription candidate" : isProtected && isSubscription ? "Mixed content; review required" : "Needs review"}</span>
-              <span aria-hidden="true">·</span>
-              <span>{unsubscribeAvailable ? "One-click available" : "No supported unsubscribe option"}</span>
-              <span aria-hidden="true">·</span>
-              <span>Last received {dateLabel}</span>
-            </span>
-          </span>
-          <span className="hidden text-right sm:block">
-            <span className="block text-2xl font-semibold leading-none text-gray-900">
-              {messages.length}
-            </span>
-            <span className="mt-1 block text-xs text-gray-500">emails</span>
           </span>
         </button>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => onAction(senderAddresses[0], "kept")}
-            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-colors ${action === "kept" ? "bg-emerald-100 text-emerald-800" : "bg-gray-100 text-gray-700 hover:bg-gray-200"}`}
-          >
-            <Archive className="h-3.5 w-3.5" />
-            {action === "kept" ? "Kept" : "Keep"}
+
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          <button type="button" onClick={onStartUnsubscribe} disabled={!canUnsubscribe || busy} className={`${actionClass} bg-rose-50 text-rose-700 hover:bg-rose-100`}>
+            <Ban className="h-3.5 w-3.5" /> Unsubscribe
           </button>
-          <button
-            type="button"
-            onClick={() => onAction(senderAddresses[0], "unsubscribed")}
-            disabled={!unsubscribeAvailable || action === "unsubscribed"}
-            title={isProtected ? "Protected email: unsubscribe is disabled" : "Explicit confirmation is required"}
-            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-colors ${action === "unsubscribed" ? "bg-rose-100 text-rose-800" : "bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40"}`}
-          >
-            <Ban className="h-3.5 w-3.5" />
-            {action === "unsubscribed" ? "Prepared" : unsubscribeAvailable ? "Unsubscribe" : classification === "protected" ? "Protected" : "Review"}
+          {sender.protectedBy ? (
+            <button type="button" onClick={() => onRule("protect", sender.protectedBy!, false)} disabled={busy} className={`${actionClass} bg-gray-100 text-gray-700 hover:bg-gray-200`}>
+              <ShieldOff className="h-3.5 w-3.5" /> Unprotect {sender.protectedBy === "domain" ? "domain" : ""}
+            </button>
+          ) : (
+            <>
+              <button type="button" onClick={() => onRule("protect", "address", true)} disabled={busy || !sender.address} className={`${actionClass} bg-amber-50 text-amber-800 hover:bg-amber-100`}>
+                <ShieldCheck className="h-3.5 w-3.5" /> Protect sender
+              </button>
+              <button type="button" onClick={() => onRule("protect", "domain", true)} disabled={busy || !sender.domain} className={`${actionClass} bg-amber-50 text-amber-800 hover:bg-amber-100`}>
+                Protect {sender.domain || "domain"}
+              </button>
+            </>
+          )}
+          <button type="button" onClick={() => onRule("ignore", "address", !sender.ignored)} disabled={busy || !sender.address || Boolean(sender.protectedBy)} className={`${actionClass} bg-gray-100 text-gray-700 hover:bg-gray-200`}>
+            <EyeOff className="h-3.5 w-3.5" /> {sender.ignored ? "Unignore" : "Ignore"}
           </button>
+          <button type="button" onClick={onToggle} className={`${actionClass} text-primary hover:bg-purple-50`}>Review</button>
         </div>
       </div>
+
+      {confirming && (
+        <UnsubscribeConfirmation sender={sender} onCancel={onCancelUnsubscribe} onConfirm={onUnsubscribe} />
+      )}
+
+      {busy && <p className="mt-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Working...</p>}
+
+      {result && (
+        <div className={`mt-3 rounded-lg p-3 text-sm ${statusLabels[result.status].className}`} role="status">
+          <p>{result.detail}</p>
+          {result.manualUrl && (
+            <a href={result.manualUrl} target="_blank" rel="noopener noreferrer nofollow" className="mt-2 inline-block font-semibold underline">
+              Open the sender&apos;s unsubscribe page
+            </a>
+          )}
+          {result.mailto && (
+            <a href={result.mailto} className="mt-2 inline-block font-semibold underline">Open the unsubscribe email in your mail app</a>
+          )}
+          {(result.manualUrl || result.mailto) && <p className="mt-2 text-xs">When you&apos;re done, mark it as finished in <Link href="/dashboard/history" className="underline">History</Link>.</p>}
+        </div>
+      )}
+
       {expanded && (
-        <div className="border-t border-gray-100 bg-gray-50/60 px-5 py-2 sm:px-6">
-          {messages.map((message) => (
-            <GmailMessageRow key={message.id} message={message} />
-          ))}
+        <div className="mt-4 grid gap-4 rounded-xl bg-gray-50 p-4 text-sm sm:grid-cols-2">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Why it&apos;s classified this way</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-gray-700">
+              {sender.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+            </ul>
+            <p className="mt-2 text-xs text-gray-500">Confidence: {sender.confidence}</p>
+          </div>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent subjects</p>
+            <ul className="mt-2 space-y-1 text-gray-700">
+              {sender.sampleSubjects.map((subject, index) => <li key={index} className="truncate">{subject}</li>)}
+            </ul>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function Pagination({
-  page,
-  pageCount,
-  shownStart,
-  shownEnd,
-  totalCount,
-  onPageChange,
-}: {
-  page: number;
-  pageCount: number;
-  shownStart: number;
-  shownEnd: number;
-  totalCount: number;
-  onPageChange: (page: number) => void;
-}) {
-  if (pageCount <= 1) return null;
+function UnsubscribeConfirmation({ sender, onCancel, onConfirm }: { sender: Sender; onCancel: () => void; onConfirm: () => void }) {
+  const [reviewed, setReviewed] = useState(false);
+  const needsReview = sender.classification === "review";
   return (
-    <div className="flex flex-col gap-3 border-t border-gray-200 px-5 py-4 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between">
-      <span>
-        Showing domains {shownStart}-{shownEnd} of {totalCount}
-      </span>
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onClick={() => onPageChange(Math.max(1, page - 1))}
-          disabled={page === 1}
-          className="rounded-lg px-3 py-1.5 text-sm hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Prev
-        </button>
-        {Array.from({ length: pageCount }, (_, index) => index + 1).map(
-          (pageNumber) => (
-            <button
-              key={pageNumber}
-              type="button"
-              onClick={() => onPageChange(pageNumber)}
-              className={`h-8 min-w-8 rounded-lg px-2 text-sm ${pageNumber === page ? "bg-primary font-semibold text-white" : "text-gray-600 hover:bg-gray-100"}`}
-            >
-              {pageNumber}
-            </button>
-          ),
-        )}
-        <button
-          type="button"
-          onClick={() => onPageChange(Math.min(pageCount, page + 1))}
-          disabled={page === pageCount}
-          className="rounded-lg px-3 py-1.5 text-sm hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Next
-        </button>
+    <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50/60 p-4 text-sm text-gray-800">
+      <p className="font-semibold">Unsubscribe from {sender.displayName}?</p>
+      <p className="mt-1 text-gray-600">
+        {sender.execution === "automatic"
+          ? `We'll send a one-click unsubscribe request to ${sender.domain}. This can't be undone from here.`
+          : "This sender doesn't support one-click unsubscribe. We'll give you their unsubscribe page or email to finish yourself."}
+      </p>
+      {needsReview && (
+        <label className="mt-3 flex items-start gap-2 text-gray-700">
+          <input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} className="mt-1" />
+          <span>I&apos;ve reviewed this sender ({sender.reasons.join("; ").toLowerCase()}) and still want to unsubscribe.</span>
+        </label>
+      )}
+      <div className="mt-3 flex gap-2">
+        <Button type="button" onClick={onConfirm} disabled={needsReview && !reviewed} className="h-9 rounded-lg bg-rose-600 px-3 text-xs font-semibold text-white hover:bg-rose-700">
+          {sender.execution === "automatic" ? "Unsubscribe" : "Show unsubscribe option"}
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} className="h-9 rounded-lg px-3 text-xs">Cancel</Button>
       </div>
     </div>
-  );
-}
-
-function GmailMessageRow({ message }: { message: ClassifiedEmail }) {
-  const getHeader = (name: string) => getMessageHeader(message, name);
-  const sender = getHeader("From") || "Unknown sender";
-  const subject = getHeader("Subject") || "(No subject)";
-  const date = getHeader("Date");
-  const senderMatch = sender.match(/^(.*?)(?:\s*<([^>]+)>)?$/);
-  const senderName = senderMatch?.[2]
-    ? senderMatch[1].replace(/^"|"$/g, "").trim()
-    : sender.split("@")[0];
-  const senderAddress = senderMatch?.[2] ?? sender;
-  const initials = (senderName || senderAddress)
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
-  const formattedDate = date
-    ? new Intl.DateTimeFormat(undefined, {
-        month: "short",
-        day: "numeric",
-      }).format(new Date(date))
-    : "Date unavailable";
-  const visibleLabels = (message.labelIds ?? [])
-    .filter(
-      (label) => !["INBOX", "UNREAD", "CATEGORY_PERSONAL"].includes(label),
-    )
-    .slice(0, 2);
-
-  return (
-    <article className="group flex gap-4 border-l-2 border-transparent p-5 transition-colors hover:border-primary hover:bg-purple-50/40 sm:p-6">
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-purple-100 text-sm font-bold text-primary">
-        {initials || <MailOpen className="h-5 w-5" />}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-          <div className="min-w-0">
-            <p
-              className="truncate text-sm font-semibold text-gray-950"
-              title={senderName || senderAddress}
-            >
-              {senderName || "Unknown sender"}
-            </p>
-            <p className="truncate text-xs text-gray-500" title={senderAddress}>
-              {senderAddress}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5 text-xs text-gray-400">
-            <CalendarDays className="h-3.5 w-3.5" />
-            <time dateTime={date || undefined}>{formattedDate}</time>
-          </div>
-        </div>
-        <p
-          className="mt-3 truncate text-sm font-medium text-gray-800"
-          title={subject}
-        >
-          {subject}
-        </p>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${message.classification === "protected" ? "bg-amber-100 text-amber-800" : message.classification === "subscription" ? "bg-emerald-100 text-emerald-800" : "bg-gray-100 text-gray-500"}`}>{message.classification} · {message.confidence} confidence</span>
-          {message.category !== "unknown" && <span className="rounded-full bg-purple-50 px-2 py-1 text-[11px] font-medium text-purple-700">{message.category}</span>}
-          {visibleLabels.map((label) => (
-            <span
-              key={label}
-              className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500"
-            >
-              <Tag className="h-3 w-3" />
-              {label.toLowerCase().replaceAll("_", " ")}
-            </span>
-          ))}
-          <span className="text-[11px] text-gray-400">
-            Message ID: {message.id.slice(0, 12)}...
-          </span>
-        </div>
-      </div>
-    </article>
   );
 }

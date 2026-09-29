@@ -1,16 +1,21 @@
-import { getGmailToken } from "@/lib/email/google-oauth";
-import { createClient } from "@/lib/supabase/server";
+import { jsonError } from "@/lib/email/route-helpers";
+import { getAuthedContext, getGmailConnection } from "@/lib/email/store";
 import { NextResponse } from "next/server";
 
 export async function GET() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Please sign in." }, { status: 401 });
+  const context = await getAuthedContext();
+  if (!context) return jsonError("Please sign in.", 401);
 
-  const token = await getGmailToken();
-  const connected = token?.userId === user.id;
-  return NextResponse.json({
-    gmailConnected: connected,
-    email: connected ? token?.email ?? null : null,
-  });
+  try {
+    const connection = await getGmailConnection(context);
+    return NextResponse.json({
+      gmailConnected: Boolean(connection),
+      email: connection?.googleEmail ?? null,
+      lastScanAt: connection?.lastScanAt ?? null,
+      lastScanStats: connection?.lastScanStats ?? null,
+    });
+  } catch (error) {
+    console.error("[gmail status] failed:", error instanceof Error ? error.message : "unknown error");
+    return jsonError("Could not check the Gmail connection.", 500);
+  }
 }

@@ -1,22 +1,25 @@
-import { getGmailToken, gmailTokenCookie, revokeGmailToken } from "@/lib/email/google-oauth";
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
+import { revokeGoogleGrant } from "@/lib/email/google-oauth";
+import { jsonError } from "@/lib/email/route-helpers";
+import { deleteGmailConnection, getAuthedContext, getGmailConnection } from "@/lib/email/store";
 import { NextResponse } from "next/server";
 
 export async function POST() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Please sign in." }, { status: 401 });
+  const context = await getAuthedContext();
+  if (!context) return jsonError("Please sign in.", 401);
 
-  const token = await getGmailToken();
-  const cookieStore = await cookies();
-  if (token?.userId === user.id) {
-    try {
-      await revokeGmailToken(token);
-    } catch {
-      // Removing the local credential still prevents any further Gmail API calls.
+  try {
+    const connection = await getGmailConnection(context);
+    if (connection) {
+      try {
+        await revokeGoogleGrant(connection.refreshToken);
+      } catch {
+        // Already revoked or expired at Google; deleting the stored token still ends our access.
+      }
     }
+    await deleteGmailConnection(context);
+    return NextResponse.json({ gmailConnected: false, email: null });
+  } catch (error) {
+    console.error("[gmail disconnect] failed:", error instanceof Error ? error.message : "unknown error");
+    return jsonError("Could not disconnect Gmail. Please try again.", 500);
   }
-  cookieStore.delete(gmailTokenCookie);
-  return NextResponse.json({ gmailConnected: false, email: null });
 }
