@@ -1,8 +1,9 @@
-import { finalizeGroups, foldMessages, getScanStats, toSenderSummary } from "@/lib/email/classifier";
+import { finalizeGroups, foldMessages, getScanStats } from "@/lib/email/classifier";
 import { createGmailClient, findBodyUnsubscribeUrls, getRecentCorrespondents, maxBodyLookups, scanBatchSize, scanMailboxBatch } from "@/lib/email/gmail";
 import { handleRouteError, jsonError } from "@/lib/email/route-helpers";
 import { decodeScanState, encodeScanState, type ScanState } from "@/lib/email/scan-state";
-import { getAuthedContext, getGmailConnection, getLatestActionsBySender, getPlan, listSenderRules, saveScanStats } from "@/lib/email/store";
+import { getAuthedContext, getGmailConnection, getPlan, listSenderRules, saveScanStats, saveScanSubscriptions } from "@/lib/email/store";
+import { toSubscriptionRow } from "@/lib/email/subscriptions";
 import { planLimits } from "@/lib/plans";
 import { NextResponse } from "next/server";
 
@@ -13,7 +14,8 @@ const minScanIntervalMs = 15_000;
 /**
  * Scans one batch of the mailbox. The first call (no cursor) starts a scan; while more
  * email remains it returns `{ done: false, cursor }`, and the browser calls again with that
- * cursor until `{ done: true, senders }` comes back.
+ * cursor until `{ done: true }` comes back. Results are stored as email subscriptions and
+ * read through /api/subscriptions, so pages load without rescanning Gmail.
  */
 export async function POST(request: Request) {
   const context = await getAuthedContext();
@@ -62,29 +64,28 @@ export async function POST(request: Request) {
       return NextResponse.json({ done: false, cursor: encodeScanState(state), scanned: state.listed });
     }
 
-    // Last batch: look for body unsubscribe links for the biggest senders that have no header.
-    const withoutMethod = Object.values(state.groups)
-      .filter((group) => group.address && !group.headerTarget && !group.bodyTarget)
-      .sort((a, b) => b.emailCount - a.emailCount)
-      .slice(0, maxBodyLookups);
+    // Last batch. Body links are looked up only for the biggest senders with no unsubscribe
+    // header that aren't protected, so personal and important mail bodies are never fetched.
+    const rules = await listSenderRules(context);
+    const correspondents = new Set(state.correspondents);
+    const withoutMethod = finalizeGroups(state.groups, { rules, correspondents })
+      .filter((group) => group.address && group.classification !== "protected" && group.unsubscribe.method === "none")
+      .slice(0, maxBodyLookups)
+      .map((group) => state.groups[group.key]);
     const bodyUrls = await findBodyUnsubscribeUrls(gmail, withoutMethod.map((group) => group.newestMessageId));
     for (const group of withoutMethod) {
       const url = bodyUrls.get(group.newestMessageId);
       if (url) group.bodyTarget = { date: group.lastReceivedAt, url };
     }
 
-    const [rules, latestActions] = await Promise.all([listSenderRules(context), getLatestActionsBySender(context, connection.googleEmail)]);
-    const groups = finalizeGroups(state.groups, { rules, correspondents: new Set(state.correspondents) });
-    const stats = getScanStats(groups, capped);
+    // Stored classification ignores protect rules (they are applied on top as protected_by),
+    // so removing a protection later restores what the scan found.
+    const baseGroups = finalizeGroups(state.groups, { rules: rules.filter((rule) => rule.kind !== "protect"), correspondents });
+    await saveScanSubscriptions(context, connection.id, baseGroups.map((group) => toSubscriptionRow(group, rules)));
+    const stats = getScanStats(finalizeGroups(state.groups, { rules, correspondents }), capped);
     await saveScanStats(context, connection.id, stats);
 
-    return NextResponse.json({
-      done: true,
-      scanned: state.listed,
-      stats,
-      rules,
-      senders: groups.map((group) => ({ ...toSenderSummary(group), lastAction: latestActions.get(group.key) ?? null })),
-    });
+    return NextResponse.json({ done: true, scanned: state.listed, stats });
   } catch (error) {
     return handleRouteError(error, context, "scan your inbox", connectionId);
   }

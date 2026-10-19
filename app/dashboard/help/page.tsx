@@ -12,7 +12,7 @@ export default function HelpPage() {
           items: [
             <>Connect Gmail on the <Link href="/connect-email" className="font-medium text-primary hover:underline">Connect email</Link> page.</>,
             <>Open <Link href="/dashboard/unsubscriber" className="font-medium text-primary hover:underline">Subscriptions</Link>. The first scan can take up to a minute for a large inbox.</>,
-            "Results are kept while you move between pages. Click Rescan to fetch fresh results.",
+            "Results are saved, so pages open instantly without rescanning Gmail. Click Rescan to pick up new senders.",
           ],
         },
         {
@@ -29,7 +29,7 @@ export default function HelpPage() {
           title: "Your actions",
           items: [
             "Unsubscribe asks you to confirm first. For senders that need review, you also confirm that you've reviewed them.",
-            "Protect sender or Protect domain blocks unsubscribing from them until you unprotect them.",
+            "Protect sender or Protect domain moves them to the Protected page and blocks unsubscribing until you unprotect them.",
             "Ignore hides a sender from your lists without unsubscribing.",
             "Review shows why a sender was sorted the way it was, plus recent subjects.",
           ],
@@ -37,8 +37,8 @@ export default function HelpPage() {
         {
           title: "What unsubscribe results mean",
           items: [
-            "Successful: the sender accepted the one-click request, or you marked a manual unsubscribe as done. Emails can take a few days to stop.",
-            "Needs your action: finish on the sender's page or send the prepared email, then mark it done in History.",
+            "Unsubscribed: the sender accepted the one-click request, or you marked a manual unsubscribe as done. The sender then shows Unsubscribed and can't be unsubscribed again. Emails can take a few days to stop.",
+            "Needs your action: finish on the sender's page or send the prepared email, then click \"Mark as unsubscribed\" (or mark it done in History).",
             "Failed: the sender rejected or didn't answer the request. You can try their unsubscribe page instead.",
             "No unsubscribe method: no unsubscribe option was found. Consider a Gmail filter instead.",
           ],
@@ -49,7 +49,7 @@ export default function HelpPage() {
             "Freemium: 10 unsubscribes per month (resets on the 1st, UTC), your newest 1,500 emails per scan, and 1 Gmail account.",
             "Premium: unlimited unsubscribes, every email from the last 6 months, and up to 3 Gmail accounts.",
             "An unsubscribe counts toward the limit when it succeeds or when you're given the sender's page to finish it. Failed attempts don't count.",
-            <>Compare plans on the <Link href="/dashboard/upgrade" className="font-medium text-primary hover:underline">Plans</Link> page.</>,
+            <>Upgrade or manage billing on the <Link href="/dashboard/upgrade" className="font-medium text-primary hover:underline">Plans</Link> page. Payments are handled by Stripe.</>,
           ],
         },
         {

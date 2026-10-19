@@ -6,39 +6,13 @@ import {
   finalizeGroups,
   foldMessages,
   getScanStats,
-  toSenderSummary,
   type ScanContext,
   type ScannedMessage,
   type SenderRule,
 } from "./classifier.ts";
 
-type HeaderList = Array<[string, string]>;
+import { emptyContext, message, newsletterHeaders, oneClick, verified, type HeaderList } from "./test-fixtures.ts";
 
-let nextId = 0;
-function message(options: { from: string; subject: string; headers?: HeaderList; labels?: string[]; daysAgo?: number; bodyUnsubscribeUrl?: string }): ScannedMessage {
-  nextId += 1;
-  return {
-    id: `m${nextId}`,
-    internalDate: Date.parse("2026-09-25T00:00:00Z") - (options.daysAgo ?? 0) * 86_400_000,
-    labelIds: options.labels ?? [],
-    bodyUnsubscribeUrl: options.bodyUnsubscribeUrl,
-    headers: [["From", options.from], ["Subject", options.subject], ...(options.headers ?? [])].map(([name, value]) => ({ name, value })),
-  };
-}
-
-function verified(domain: string, signsListHeaders = true): HeaderList {
-  return [
-    ["Authentication-Results", `mx.google.com; dkim=pass header.i=@${domain} header.s=s1; spf=pass smtp.mailfrom=${domain}; dmarc=pass (p=NONE) header.from=${domain}`],
-    ["DKIM-Signature", `v=1; a=rsa-sha256; d=${domain}; s=s1; h=From:Subject:Date${signsListHeaders ? ":List-Unsubscribe:List-Unsubscribe-Post" : ""}; bh=x; b=y`],
-  ];
-}
-
-function oneClick(url: string): HeaderList {
-  return [["List-Unsubscribe", `<${url}>, <mailto:unsub@example.com>`], ["List-Unsubscribe-Post", "List-Unsubscribe=One-Click"]];
-}
-
-const newsletterHeaders: HeaderList = [...oneClick("https://news.example.com/u/abc"), ["List-ID", "Weekly <weekly.news.example.com>"], ...verified("news.example.com")];
-const emptyContext: ScanContext = { rules: [], correspondents: new Set() };
 const confirm = { confirmed: true, acknowledgeReview: false };
 
 function single(messages: ScannedMessage[], context = emptyContext) {
@@ -125,14 +99,14 @@ test("user protection by domain covers subdomains and blocks unsubscribe", () =>
   const rules: SenderRule[] = [{ id: "r1", kind: "protect", matchType: "domain", value: "example.com" }];
   const group = single([message({ from: "hello@news.example.com", subject: "Weekly", headers: newsletterHeaders })], { rules, correspondents: new Set() });
   assert.equal(group.classification, "protected");
-  assert.equal(toSenderSummary(group).protectedBy, "domain");
+  assert.equal(group.protectRule?.matchType, "domain");
   assert.equal(evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: true }).outcome, "blocked");
 });
 
 test("ignored senders are hidden from counts but still classified", () => {
   const rules: SenderRule[] = [{ id: "r1", kind: "ignore", matchType: "address", value: "hello@news.example.com" }];
   const groups = buildSenderGroups([message({ from: "hello@news.example.com", subject: "Weekly", headers: newsletterHeaders })], { rules, correspondents: new Set() });
-  assert.equal(toSenderSummary(groups[0]).ignored, true);
+  assert.ok(groups[0].ignoreRule);
   assert.deepEqual(getScanStats(groups, false), { analyzed: 1, senders: 1, subscriptions: 0, protected: 0, review: 0, ignored: 1, capped: false });
 });
 
@@ -177,13 +151,6 @@ test("no unsubscribe method is reported as such", () => {
   assert.equal(evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: true }).outcome, "no_method");
 });
 
-test("summaries sent to the browser carry no URLs or message IDs", () => {
-  const summary = toSenderSummary(single([message({ from: "hello@news.example.com", subject: "Weekly", headers: newsletterHeaders })]));
-  const serialized = JSON.stringify(summary);
-  assert.doesNotMatch(serialized, /https:\/\//);
-  assert.doesNotMatch(serialized, /"m\d+"/);
-});
-
 test("folding messages in batches gives the same result as all at once", () => {
   const messages = [
     message({ from: "hello@news.example.com", subject: "Weekly 1", headers: newsletterHeaders, daysAgo: 2 }),
@@ -197,5 +164,5 @@ test("folding messages in batches gives the same result as all at once", () => {
   assert.deepEqual(finalizeGroups(restored, emptyContext), buildSenderGroups(messages, emptyContext));
   const newsletter = finalizeGroups(restored, emptyContext).find((group) => group.address === "hello@news.example.com");
   assert.equal(newsletter?.emailCount, 3);
-  assert.deepEqual(newsletter?.sampleSubjects, ["Weekly 2", "Weekly 1", "Weekly 3"]);
+  assert.equal(newsletter?.lastReceivedAt, Date.parse("2026-09-25T00:00:00Z"));
 });

@@ -3,22 +3,23 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
-import { CircleHelp, Clock3, Inbox, LayoutDashboard, MailPlus, Menu, ShieldCheck, X } from "lucide-react";
+import { CircleHelp, Clock3, Inbox, LayoutDashboard, LockKeyhole, Mail, MailPlus, Menu, ShieldCheck, X } from "lucide-react";
 import { logout } from "@/app/actions/auth";
 import { Button } from "@/components/ui/button";
 import { PlanCard } from "./plan-card";
-import { clearScanSnapshot } from "./scan-cache";
 
 const workspaceItems = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
   { label: "Subscriptions", href: "/dashboard/unsubscriber", icon: Inbox },
+  { label: "Protected", href: "/dashboard/protected", icon: ShieldCheck },
   { label: "History", href: "/dashboard/history", icon: Clock3 },
 ];
 
 const manageItems = [
   { label: "Connect email", href: "/connect-email", icon: MailPlus },
-  { label: "Privacy & data", href: "/dashboard/privacy", icon: ShieldCheck },
+  { label: "Privacy & data", href: "/dashboard/privacy", icon: LockKeyhole },
   { label: "Help center", href: "/dashboard/help", icon: CircleHelp },
+  { label: "Contact us", href: "/dashboard/contact", icon: Mail },
 ];
 
 function NavLink({ item, active, onClick }: { item: (typeof workspaceItems)[number]; active: boolean; onClick?: () => void }) {
@@ -65,7 +66,7 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
 
       <div className="mt-auto space-y-3 pt-6">
         <PlanCard onNavigate={onClose} />
-        <form action={logout} onSubmit={clearScanSnapshot} className="px-2">
+        <form action={logout} className="px-2">
           <Button type="submit" variant="outline" className="w-full border-gray-200 text-gray-600 hover:text-gray-950">Log out</Button>
         </form>
       </div>

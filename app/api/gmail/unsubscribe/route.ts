@@ -9,7 +9,10 @@ import {
   finishUnsubscribeAction,
   getAuthedContext,
   getGmailConnection,
-  getLatestAction,
+  getSubscription,
+  claimSubscriptionForUnsubscribe,
+  setSubscriptionStatus,
+  type GmailConnection,
   getPlan,
   listSenderRules,
   recordUnsubscribeAction,
@@ -18,6 +21,7 @@ import {
   type AuthedContext,
 } from "@/lib/email/store";
 import { planLimits } from "@/lib/plans";
+import { statusAfterAttempt, toSubscriptionView, type SubscriptionStatus } from "@/lib/email/subscriptions";
 import { NextResponse } from "next/server";
 
 export const maxDuration = 30;
@@ -54,24 +58,44 @@ export async function POST(request: Request) {
     if (!connection) return jsonError("Gmail is not connected.", 400, { gmailConnected: false });
     connectionId = connection.id;
 
-    // Re-derive the sender from Gmail right now; never trust a URL or classification from the browser.
-    const gmail = createGmailClient(connection.refreshToken);
-    const [{ messages, correspondents }, rules] = await Promise.all([scanSender(gmail, address), listSenderRules(context)]);
-    const group = buildSenderGroups(messages, { rules, correspondents }).find((item) => item.key === key);
-    if (!group) return jsonError("No recent email from this sender was found in your connected Gmail.", 404);
+    // The stored subscription is the source of truth for status, and claiming it
+    // (active -> unsubscribing) is atomic, so a double click can't send two requests.
+    const stored = await getSubscription(context, connection.id, key);
+    if (!stored) return jsonError("This sender isn't in your latest scan. Rescan and try again.", 404);
+    if (stored.classification === "protected") return jsonError("This sender is protected. Remove the protection first if you really want to unsubscribe.", 409, { subscription: toSubscriptionView(stored) });
+    if (stored.status === "unsubscribed") return jsonError("You've already unsubscribed from this sender.", 409, { subscription: toSubscriptionView(stored) });
+    const claimed = await claimSubscriptionForUnsubscribe(context, stored.id);
+    if (!claimed) return jsonError("An unsubscribe for this sender is already in progress.", 409, { subscription: toSubscriptionView({ ...stored, status: "unsubscribing" }) });
 
-    const decision = evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: body.acknowledgeReview === true });
-    if (decision.outcome === "blocked") return jsonError(decision.reason, 409);
-
-    const latest = await getLatestAction(context, connection.googleEmail, key);
-    if (latest?.status === "success" && Date.parse(latest.createdAt) >= group.lastReceivedAt) {
-      return NextResponse.json({ status: "success", actionId: latest.id, detail: "You already unsubscribed, and no new email from this sender has arrived since." });
+    let attempt: Attempt;
+    try {
+      attempt = await attemptUnsubscribe(context, connection, key, address, body.acknowledgeReview === true);
+    } catch (error) {
+      await setSubscriptionStatus(context, claimed.id, "active").catch(() => undefined);
+      throw error;
     }
-
-    return NextResponse.json(await execute(context, connection.googleEmail, group, decision));
+    const updated = await setSubscriptionStatus(context, claimed.id, attempt.subscriptionStatus);
+    return NextResponse.json({ ...attempt.body, subscription: toSubscriptionView(updated) }, { status: attempt.httpStatus });
   } catch (error) {
     return handleRouteError(error, context, "unsubscribe", connectionId);
   }
+}
+
+type Attempt = { subscriptionStatus: SubscriptionStatus; httpStatus: number; body: Record<string, unknown> };
+
+async function attemptUnsubscribe(context: AuthedContext, connection: GmailConnection, key: string, address: string, acknowledgeReview: boolean): Promise<Attempt> {
+  // Re-derive this one sender from Gmail right now (not the whole mailbox); never trust a
+  // URL or classification from the browser or the stored row for the safety decision.
+  const gmail = createGmailClient(connection.refreshToken);
+  const [{ messages, correspondents }, rules] = await Promise.all([scanSender(gmail, address), listSenderRules(context)]);
+  const group = buildSenderGroups(messages, { rules, correspondents }).find((item) => item.key === key);
+  if (!group) return { subscriptionStatus: "active", httpStatus: 404, body: { error: "No recent email from this sender was found in your connected Gmail." } };
+
+  const decision = evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview });
+  if (decision.outcome === "blocked") return { subscriptionStatus: "active", httpStatus: 409, body: { error: decision.reason } };
+
+  const result = await execute(context, connection.googleEmail, group, decision);
+  return { subscriptionStatus: statusAfterAttempt(result.status), httpStatus: 200, body: result };
 }
 
 async function execute(
@@ -94,7 +118,7 @@ async function execute(
   if (decision.outcome === "no_method") {
     const detail = "No unsubscribe option was found for this sender. You could filter or block it in Gmail instead.";
     const actionId = await recordUnsubscribeAction(context, record, { status: "no_method", detail });
-    return { status: "no_method", actionId, detail };
+    return { status: "no_method" as const, actionId, detail };
   }
 
   if (decision.outcome === "manual") {
@@ -103,11 +127,11 @@ async function execute(
       : "This sender needs you to finish on their website. Open the link, then mark it done in History.";
     const actionId = await recordUnsubscribeAction(context, record, { status: "manual_required", detail });
     if (actionId) await recordUnsubscribeUsage(context, actionId);
-    return { status: "manual_required", actionId, detail, manualUrl: decision.url, mailto: decision.mailto };
+    return { status: "manual_required" as const, actionId, detail, manualUrl: decision.url, mailto: decision.mailto };
   }
 
   const actionId = await startUnsubscribeAction(context, record);
-  if (!actionId) return { status: "pending", actionId: null, detail: "An unsubscribe request for this sender is already in progress." };
+  if (!actionId) return { status: "failed" as const, actionId: null, detail: "An unsubscribe request for this sender is already in progress." };
 
   const result = await sendOneClickUnsubscribe(decision.url);
   const outcome = result.kind === "accepted"

@@ -26,7 +26,7 @@ export function Footer() {
             <span className="text-gray-300 font-normal">|</span>
             <a href="#" className="hover:text-primary transition-colors">ABOUT US</a>
             <span className="text-gray-300 font-normal">|</span>
-            <a href="#" className="hover:text-primary transition-colors">CONTACT US</a>
+            <a href="/contact" className="hover:text-primary transition-colors">CONTACT US</a>
           </div>
         </div>
 

@@ -39,7 +39,7 @@ export type ScanContext = {
 /**
  * Running totals for one sender. Scans fold messages into these batch by batch, so a
  * large mailbox never has to be held in memory, and only what classification needs is
- * kept (no message bodies, and only the 3 newest subjects).
+ * kept (no message bodies or subjects).
  */
 export type SenderAccumulator = {
   key: string;
@@ -57,7 +57,6 @@ export type SenderAccumulator = {
   important: number;
   starred: boolean;
   importantTopics: string[];
-  recentSubjects: Array<{ subject: string; date: number }>;
   /** Unsubscribe details from the newest message that carried a List-Unsubscribe header. */
   headerTarget: { date: number; unsubscribe: UnsubscribeInfo; authentication: SenderAuthentication } | null;
   bodyTarget: { date: number; url: string } | null;
@@ -74,7 +73,6 @@ export type SenderGroup = {
   emailCount: number;
   lastReceivedAt: number;
   newestMessageId: string;
-  sampleSubjects: string[];
   classification: Classification;
   confidence: Confidence;
   reasons: string[];
@@ -82,25 +80,6 @@ export type SenderGroup = {
   ignoreRule: SenderRule | null;
   unsubscribe: UnsubscribeInfo;
   authentication: SenderAuthentication;
-};
-
-/** What the browser receives: no bodies, no unsubscribe URLs, no message IDs. */
-export type SenderSummary = {
-  key: string;
-  displayName: string;
-  address: string;
-  domain: string;
-  listId: string | null;
-  emailCount: number;
-  lastReceivedAt: string;
-  sampleSubjects: string[];
-  classification: Classification;
-  confidence: Confidence;
-  reasons: string[];
-  unsubscribeMethod: UnsubscribeMethod;
-  execution: ExecutionMode;
-  protectedBy: SenderRule["matchType"] | null;
-  ignored: boolean;
 };
 
 export type ScanStats = {
@@ -172,7 +151,6 @@ export function foldMessages(groups: SenderAccumulators, messages: ScannedMessag
       important: 0,
       starred: false,
       importantTopics: [],
-      recentSubjects: [],
       headerTarget: null,
       bodyTarget: null,
     };
@@ -194,9 +172,6 @@ export function foldMessages(groups: SenderAccumulators, messages: ScannedMessag
     for (const [topic, pattern] of importantSubjectRules) {
       if (pattern.test(subject) && !group.importantTopics.includes(topic)) group.importantTopics.push(topic);
     }
-    group.recentSubjects = [...group.recentSubjects, { subject: subject.slice(0, 140), date }]
-      .sort((a, b) => b.date - a.date)
-      .slice(0, 3);
 
     // The newest message carries the most current unsubscribe endpoint.
     const unsubscribe = parseListUnsubscribe(message.headers);
@@ -281,7 +256,6 @@ export function finalizeGroups(groups: SenderAccumulators, context: ScanContext)
       emailCount: group.emailCount,
       lastReceivedAt: group.lastReceivedAt,
       newestMessageId: group.newestMessageId,
-      sampleSubjects: group.recentSubjects.map((item) => item.subject || "(No subject)"),
       protectRule,
       ignoreRule: group.address ? findRule(context.rules, "ignore", group.address, group.domain) : null,
       unsubscribe,
@@ -324,26 +298,6 @@ export function getExecutionMode(group: SenderGroup): ExecutionMode {
   if (group.classification === "protected" || group.unsubscribe.method === "none" || !group.address) return "none";
   const decision = evaluateUnsubscribe(group, { confirmed: true, acknowledgeReview: true });
   return decision.outcome === "automatic" ? "automatic" : decision.outcome === "manual" ? "manual" : "none";
-}
-
-export function toSenderSummary(group: SenderGroup): SenderSummary {
-  return {
-    key: group.key,
-    displayName: group.displayName,
-    address: group.address,
-    domain: group.domain,
-    listId: group.listId,
-    emailCount: group.emailCount,
-    lastReceivedAt: new Date(group.lastReceivedAt).toISOString(),
-    sampleSubjects: group.sampleSubjects,
-    classification: group.classification,
-    confidence: group.confidence,
-    reasons: group.reasons,
-    unsubscribeMethod: group.unsubscribe.method,
-    execution: getExecutionMode(group),
-    protectedBy: group.protectRule?.matchType ?? null,
-    ignored: Boolean(group.ignoreRule) && !group.protectRule,
-  };
 }
 
 export function getScanStats(groups: SenderGroup[], capped: boolean): ScanStats {

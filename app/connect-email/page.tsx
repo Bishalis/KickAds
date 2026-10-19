@@ -5,7 +5,6 @@ import { Suspense, useEffect, useState } from "react";
 import { ArrowLeft, Check, Inbox, LockKeyhole, Mail, ShieldCheck, Unplug } from "lucide-react";
 import { FcGoogle } from "react-icons/fc";
 import { useSearchParams } from "next/navigation";
-import { clearScanSnapshot } from "@/components/dashboard/scan-cache";
 import type { GmailAccount } from "@/lib/email/store";
 import { planLimits, planUsageChangedEvent, type Plan } from "@/lib/plans";
 
@@ -58,7 +57,6 @@ function ConnectEmailContent() {
       body: JSON.stringify({ accountId }),
     });
     if (response.ok) {
-      clearScanSnapshot();
       window.dispatchEvent(new Event(planUsageChangedEvent));
       setAccounts((current) => current.filter((account) => account.id !== accountId));
     } else {

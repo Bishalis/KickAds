@@ -1,6 +1,8 @@
 import { Check, Crown, Sparkles } from "lucide-react";
 import { getAuthedContext, getPlanUsage } from "@/lib/email/store";
-import { planLimits, type Plan } from "@/lib/plans";
+import { Suspense } from "react";
+import { BillingActions } from "@/components/dashboard/billing-actions";
+import { planLimits, premiumPriceLabel, type Plan } from "@/lib/plans";
 import { redirect } from "next/navigation";
 
 const features: Record<Plan, string[]> = {
@@ -49,13 +51,11 @@ export default async function UpgradePage() {
                   <li key={feature} className="flex items-start gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" /> {feature}</li>
                 ))}
               </ul>
-              {plan === "premium" && !isCurrent && (
-                <div className="mt-6">
-                  <button type="button" disabled className="h-11 w-full cursor-not-allowed rounded-xl bg-primary text-sm font-semibold text-white opacity-60">
-                    Online checkout coming soon
-                  </button>
-                  <p className="mt-2 text-xs text-gray-500">During early access, Premium is enabled by the KickAds team.</p>
-                </div>
+              {plan === "premium" && (
+                <p className="mt-5 text-2xl font-bold text-gray-950">{premiumPriceLabel}</p>
+              )}
+              {plan === "premium" && usage && (
+                <Suspense fallback={null}><BillingActions usage={usage} /></Suspense>
               )}
             </section>
           );

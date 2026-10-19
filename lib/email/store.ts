@@ -4,6 +4,8 @@ import type { ScanStats, SenderRule } from "./classifier.ts";
 import { decryptSecret, encryptSecret } from "./google-oauth.ts";
 import type { UnsubscribeMethod } from "./unsubscribe.ts";
 import { PlanLimitError, planLimits, startOfUtcMonth, type Plan, type PlanUsage } from "@/lib/plans";
+import { findRule } from "./classifier.ts";
+import { tabFilter, type StoredSubscription, type SubscriptionRow, type SubscriptionStatus, type SubscriptionTab } from "./subscriptions.ts";
 
 type Supabase = Awaited<ReturnType<typeof createClient>>;
 
@@ -104,9 +106,26 @@ export async function recordUnsubscribeUsage({ supabase, user }: AuthedContext, 
 }
 
 export async function getPlanUsage(context: AuthedContext): Promise<PlanUsage> {
-  const plan = await getPlan(context);
+  const { data, error } = await context.supabase
+    .from("user_plans")
+    .select("plan, stripe_customer_id, subscription_status, current_period_end, cancel_at_period_end")
+    .eq("user_id", context.user.id)
+    .maybeSingle();
+  if (error) throw new Error(`Could not load your plan: ${error.message}`);
+  const plan: Plan = data?.plan === "premium" ? "premium" : "free";
   const [unsubscribesThisMonth, accounts] = await Promise.all([countUnsubscribesThisMonth(context), listGmailAccounts(context, plan)]);
-  return { plan, limits: planLimits[plan], unsubscribesThisMonth, accountsConnected: accounts.length };
+  return {
+    plan,
+    limits: planLimits[plan],
+    unsubscribesThisMonth,
+    accountsConnected: accounts.length,
+    billing: {
+      subscriptionStatus: data?.subscription_status ?? null,
+      currentPeriodEnd: data?.current_period_end ?? null,
+      cancelAtPeriodEnd: data?.cancel_at_period_end ?? false,
+      hasBillingAccount: Boolean(data?.stripe_customer_id),
+    },
+  };
 }
 
 export async function listSenderRules({ supabase }: AuthedContext): Promise<SenderRule[]> {
@@ -176,23 +195,6 @@ export async function countRecentActions({ supabase }: AuthedContext, sinceMs: n
   return count ?? 0;
 }
 
-/** Most recent attempt per sender key for one Gmail account, so the scan can show what already happened. */
-export async function getLatestActionsBySender({ supabase }: AuthedContext, accountEmail: string) {
-  const { data, error } = await supabase.from("unsubscribe_actions").select(actionColumns).eq("account_email", accountEmail).order("created_at", { ascending: false }).limit(500);
-  if (error) throw new Error(`Could not load unsubscribe history: ${error.message}`);
-  const latest = new Map<string, Pick<UnsubscribeAction, "id" | "status" | "createdAt">>();
-  for (const action of (data ?? []).map(toAction)) {
-    if (!latest.has(action.senderKey)) latest.set(action.senderKey, { id: action.id, status: action.status, createdAt: action.createdAt });
-  }
-  return latest;
-}
-
-/** Latest attempt for a sender in one Gmail account, used to avoid repeating a request that already worked. */
-export async function getLatestAction({ supabase }: AuthedContext, accountEmail: string, senderKey: string) {
-  const { data } = await supabase.from("unsubscribe_actions").select(actionColumns).eq("account_email", accountEmail).eq("sender_key", senderKey).order("created_at", { ascending: false }).limit(1).maybeSingle();
-  return data ? toAction(data) : null;
-}
-
 /** Inserts a pending attempt. Returns null when another attempt for this sender is already in flight. */
 export async function startUnsubscribeAction({ supabase, user }: AuthedContext, action: { accountEmail: string; senderKey: string; senderAddress: string; senderDomain: string; displayName: string; listId: string | null; method: UnsubscribeMethod; targetHost: string | null }) {
   // A pending row older than two minutes belongs to a request that crashed; close it out.
@@ -230,11 +232,119 @@ export async function recordUnsubscribeAction(context: AuthedContext, action: Pa
   return id;
 }
 
-/** The user confirms they finished a manual unsubscribe themselves. */
-export async function confirmManualAction({ supabase }: AuthedContext, id: string) {
-  const { data, error } = await supabase.from("unsubscribe_actions")
+/**
+ * The user confirms they finished a manual unsubscribe themselves: the history entry
+ * becomes a success and the sender's subscription is marked unsubscribed.
+ */
+export async function confirmManualAction(context: AuthedContext, id: string) {
+  const { data, error } = await context.supabase.from("unsubscribe_actions")
     .update({ status: "success", detail: "You confirmed you unsubscribed using the sender's page.", updated_at: new Date().toISOString() })
-    .eq("id", id).eq("status", "manual_required").select("id");
+    .eq("id", id).eq("status", "manual_required").select("account_email, sender_key");
   if (error) throw new Error(`Could not update the unsubscribe history: ${error.message}`);
-  return Boolean(data?.length);
+  const action = data?.[0];
+  if (!action) return false;
+  await markSubscriptionUnsubscribed(context, action.account_email, action.sender_key);
+  return true;
+}
+
+// ---- Email subscriptions: the current state of each sender ----
+
+const subscriptionColumns = "id, sender_key, display_name, address, domain, list_id, email_count, last_received_at, base_classification, classification, confidence, reasons, unsubscribe_method, execution, protected_by, ignored, status, unsubscribed_at";
+
+/**
+ * Saves a finished scan. Existing rows keep their unsubscribe status (it isn't in the
+ * payload); active senders that no longer appear in the scan window are removed, while
+ * unsubscribed ones are kept as the record of that decision.
+ */
+export async function saveScanSubscriptions({ supabase, user }: AuthedContext, connectionId: string, rows: SubscriptionRow[]) {
+  const seenAt = new Date().toISOString();
+  for (let index = 0; index < rows.length; index += 500) {
+    const chunk = rows.slice(index, index + 500).map((row) => ({ ...row, user_id: user.id, connection_id: connectionId, last_seen_at: seenAt }));
+    const { error } = await supabase.from("email_subscriptions").upsert(chunk, { onConflict: "connection_id,sender_key" });
+    if (error) throw new Error(`Could not save scan results: ${error.message}`);
+  }
+  const { error } = await supabase.from("email_subscriptions").delete()
+    .eq("connection_id", connectionId).eq("status", "active").lt("last_seen_at", seenAt);
+  if (error) throw new Error(`Could not clean up old senders: ${error.message}`);
+}
+
+export async function listSubscriptions({ supabase }: AuthedContext, connectionId: string, tab: SubscriptionTab): Promise<StoredSubscription[]> {
+  const filter = tabFilter(tab);
+  let query = supabase.from("email_subscriptions").select(subscriptionColumns).eq("connection_id", connectionId);
+  if (filter.classification) query = query.eq("classification", filter.classification);
+  if (filter.excludeProtected) query = query.neq("classification", "protected");
+  if (filter.ignored !== null) query = query.eq("ignored", filter.ignored);
+  const { data, error } = await query.order("email_count", { ascending: false }).limit(5000);
+  if (error) throw new Error(`Could not load subscriptions: ${error.message}`);
+  return (data ?? []) as StoredSubscription[];
+}
+
+export async function countSubscriptionTabs({ supabase }: AuthedContext, connectionId: string): Promise<Record<SubscriptionTab, number>> {
+  const { data, error } = await supabase.from("email_subscriptions").select("classification, ignored").eq("connection_id", connectionId).limit(20000);
+  if (error) throw new Error(`Could not count subscriptions: ${error.message}`);
+  const counts: Record<SubscriptionTab, number> = { subscription: 0, review: 0, ignored: 0, protected: 0 };
+  for (const row of data ?? []) {
+    if (row.classification === "protected") counts.protected += 1;
+    else if (row.ignored) counts.ignored += 1;
+    else counts[row.classification as "subscription" | "review"] += 1;
+  }
+  return counts;
+}
+
+export async function getSubscription({ supabase }: AuthedContext, connectionId: string, senderKey: string): Promise<StoredSubscription | null> {
+  const { data, error } = await supabase.from("email_subscriptions").select(subscriptionColumns).eq("connection_id", connectionId).eq("sender_key", senderKey).maybeSingle();
+  if (error) throw new Error(`Could not load the subscription: ${error.message}`);
+  return data as StoredSubscription | null;
+}
+
+/**
+ * Atomically moves a sender from active to unsubscribing. Returns null if it is already
+ * unsubscribed or another request is working on it, which blocks duplicate unsubscribes.
+ * An "unsubscribing" state older than two minutes belongs to a crashed request and can be retried.
+ */
+export async function claimSubscriptionForUnsubscribe({ supabase }: AuthedContext, id: string): Promise<StoredSubscription | null> {
+  const stale = new Date(Date.now() - 120_000).toISOString();
+  const { data, error } = await supabase.from("email_subscriptions")
+    .update({ status: "unsubscribing", status_changed_at: new Date().toISOString() })
+    .eq("id", id)
+    .or(`status.eq.active,and(status.eq.unsubscribing,status_changed_at.lt."${stale}")`)
+    .select(subscriptionColumns)
+    .maybeSingle();
+  if (error) throw new Error(`Could not start the unsubscribe: ${error.message}`);
+  return data as StoredSubscription | null;
+}
+
+export async function setSubscriptionStatus({ supabase }: AuthedContext, id: string, status: SubscriptionStatus): Promise<StoredSubscription> {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase.from("email_subscriptions")
+    .update({ status, status_changed_at: now, ...(status === "unsubscribed" ? { unsubscribed_at: now } : {}) })
+    .eq("id", id)
+    .select(subscriptionColumns)
+    .single();
+  if (error) throw new Error(`Could not update the subscription: ${error.message}`);
+  return data as StoredSubscription;
+}
+
+/** After the user finishes a manual unsubscribe, mark the matching sender unsubscribed. */
+export async function markSubscriptionUnsubscribed(context: AuthedContext, accountEmail: string | null, senderKey: string) {
+  if (!accountEmail) return;
+  const { data: connection } = await context.supabase.from("gmail_connections").select("id").eq("google_email", accountEmail).maybeSingle();
+  if (!connection) return;
+  const subscription = await getSubscription(context, connection.id, senderKey);
+  if (subscription && subscription.status !== "unsubscribed") await setSubscriptionStatus(context, subscription.id, "unsubscribed");
+}
+
+/** Re-applies protect/ignore rules to stored senders without rescanning Gmail. */
+export async function applyRulesToSubscriptions({ supabase }: AuthedContext, rules: Awaited<ReturnType<typeof listSenderRules>>) {
+  const { data, error } = await supabase.from("email_subscriptions").select("id, address, domain, protected_by, ignored").limit(20000);
+  if (error) throw new Error(`Could not load subscriptions: ${error.message}`);
+  const changes = (data ?? []).flatMap((row) => {
+    const protectedBy = row.address ? findRule(rules, "protect", row.address, row.domain)?.matchType ?? null : null;
+    const ignored = row.address ? Boolean(findRule(rules, "ignore", row.address, row.domain)) : false;
+    return protectedBy !== row.protected_by || ignored !== row.ignored ? [{ id: row.id as string, protected_by: protectedBy, ignored }] : [];
+  });
+  for (const change of changes) {
+    const { error: updateError } = await supabase.from("email_subscriptions").update({ protected_by: change.protected_by, ignored: change.ignored }).eq("id", change.id);
+    if (updateError) throw new Error(`Could not apply the sender rule: ${updateError.message}`);
+  }
 }

@@ -1,7 +1,7 @@
 import type { SenderRule } from "@/lib/email/classifier";
 import { jsonError } from "@/lib/email/route-helpers";
 import { isValidDomain, isValidEmailAddress } from "@/lib/email/sender";
-import { addSenderRule, deleteSenderRule, getAuthedContext, listSenderRules } from "@/lib/email/store";
+import { addSenderRule, applyRulesToSubscriptions, deleteSenderRule, getAuthedContext, listSenderRules } from "@/lib/email/store";
 import { NextResponse } from "next/server";
 
 function failure(action: string, error: unknown) {
@@ -35,7 +35,10 @@ export async function POST(request: Request) {
   try {
     const rule: Omit<SenderRule, "id"> = { kind, matchType, value };
     await addSenderRule(context, rule);
-    return NextResponse.json({ rules: await listSenderRules(context) });
+    // Update stored senders right away, without rescanning Gmail.
+    const rules = await listSenderRules(context);
+    await applyRulesToSubscriptions(context, rules);
+    return NextResponse.json({ rules });
   } catch (error) {
     return failure("save", error);
   }
@@ -49,7 +52,10 @@ export async function DELETE(request: Request) {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return jsonError("Unknown rule.", 400);
   try {
     await deleteSenderRule(context, id);
-    return NextResponse.json({ rules: await listSenderRules(context) });
+    // Update stored senders right away, without rescanning Gmail.
+    const rules = await listSenderRules(context);
+    await applyRulesToSubscriptions(context, rules);
+    return NextResponse.json({ rules });
   } catch (error) {
     return failure("remove", error);
   }
