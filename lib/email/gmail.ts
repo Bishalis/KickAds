@@ -1,5 +1,6 @@
 import { google, type gmail_v1 } from "googleapis";
 import type { ScannedMessage } from "./classifier.ts";
+import { fakeServicesUrl } from "../test-hooks.ts";
 import { createAuthorizedClient } from "./google-oauth.ts";
 import { normalizeSender } from "./sender.ts";
 import { extractBodyUnsubscribeUrl, getHeader, parseListUnsubscribe } from "./unsubscribe.ts";
@@ -17,8 +18,9 @@ export const maxBodyLookups = 40;
 export const scanBatchSize = 1000;
 const concurrency = 8;
 // Gmail allows 250 quota units per user per second and list/get cost 5 units each (50/s).
-// Starting at most one request every 25ms (40/s) stays under that with headroom.
-const minRequestIntervalMs = 25;
+// Starting at most one request every 25ms (40/s) stays under that with headroom. Automated
+// tests talk to an in-memory Gmail stand-in, so they skip the pacing.
+const minRequestIntervalMs = process.env.NODE_ENV === "test" ? 0 : 25;
 const metadataHeaders = [
   "From", "Subject", "Date", "List-Unsubscribe", "List-Unsubscribe-Post", "List-ID",
   "Precedence", "Authentication-Results", "DKIM-Signature",
@@ -109,7 +111,11 @@ async function mapConcurrent<T, R>(items: T[], worker: (item: T) => Promise<R>):
 }
 
 export function createGmailClient(refreshToken: string): Gmail {
-  return google.gmail({ version: "v1", auth: createAuthorizedClient(refreshToken) });
+  return google.gmail({
+    version: "v1",
+    auth: createAuthorizedClient(refreshToken),
+    ...(fakeServicesUrl ? { rootUrl: `${fakeServicesUrl}/` } : {}),
+  });
 }
 
 async function listMessageIds(gmail: Gmail, q: string, limit: number, startPageToken?: string) {

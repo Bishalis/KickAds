@@ -419,7 +419,7 @@ function SenderRow({ mode, sender, expanded, confirming, busy, anyBusy, result, 
   const isProtected = sender.classification === "protected";
 
   return (
-    <div className="px-5 py-4 sm:px-6">
+    <div className="px-5 py-4 sm:px-6" data-sender={sender.address}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
         <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-3 text-left" aria-expanded={expanded}>
           <ChevronRight className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${expanded ? "rotate-90" : ""}`} />

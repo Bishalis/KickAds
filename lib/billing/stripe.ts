@@ -1,11 +1,16 @@
 import "server-only";
 import Stripe from "stripe";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { fakeServicesUrl } from "@/lib/test-hooks";
 import type { BillingStore } from "./webhook.ts";
 
 export function getStripe() {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("STRIPE_SECRET_KEY is not configured.");
+  if (fakeServicesUrl) {
+    const fake = new URL(fakeServicesUrl);
+    return new Stripe(key, { host: fake.hostname, port: fake.port, protocol: "http" });
+  }
   return new Stripe(key);
 }
 

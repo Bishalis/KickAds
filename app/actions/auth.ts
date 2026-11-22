@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { signupUser } from "@/lib/auth/signup";
 
 export type AuthState = {
   error?: string;
@@ -45,56 +46,13 @@ export async function signup(
   formData: FormData,
 ): Promise<AuthState> {
   const supabase = await createClient();
-
-  const username = formData.get("username");
-  const email = formData.get("email");
-  const password = formData.get("password");
-  const confirmPassword = formData.get("confirmPassword");
-
-  if (
-    typeof username !== "string" ||
-    typeof email !== "string" ||
-    typeof password !== "string" ||
-    typeof confirmPassword !== "string" ||
-    !username ||
-    !email ||
-    !password ||
-    !confirmPassword
-  ) {
-    return { error: "Complete all fields to create your account." };
-  }
-
-  if (password !== confirmPassword) {
-    return { error: "Passwords do not match." };
-  }
-
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"}/auth/callback`,
-      data: {
-        username,
-        email,
-      },
-    },
-  });
-
-  if (error) {
-    return {
-      error: error.message,
-      username,
-      email,
-    };
-  }
-
-  if (!data.session) {
-    return {
-      message: "Check your email to confirm your account, then sign in.",
-    };
-  }
-
-  redirect("/auth/login");
+  const result = await signupUser(
+    (params) => supabase.auth.signUp(params),
+    formData,
+    process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000",
+  );
+  if ("redirectTo" in result) redirect(result.redirectTo);
+  return result;
 }
 
 export async function logout() {

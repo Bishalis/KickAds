@@ -31,7 +31,7 @@ export default function HelpPage() {
             "Unsubscribe asks you to confirm first. For senders that need review, you also confirm that you've reviewed them.",
             "Protect sender or Protect domain moves them to the Protected page and blocks unsubscribing until you unprotect them.",
             "Ignore hides a sender from your lists without unsubscribing.",
-            "Review shows why a sender was sorted the way it was, plus recent subjects.",
+            "Review shows why a sender was sorted the way it was, and how unsubscribing from it would work.",
           ],
         },
         {

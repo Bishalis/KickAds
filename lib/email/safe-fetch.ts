@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { request } from "node:https";
 import { BlockList, isIP, type LookupFunction } from "node:net";
+import { fakeServicesUrl } from "../test-hooks.ts";
 import { parseUnsubscribeUrl } from "./unsubscribe.ts";
 
 const nonPublicRanges = new BlockList();
@@ -42,6 +43,8 @@ const maxResponseBytes = 64 * 1024;
 export async function sendOneClickUnsubscribe(target: string): Promise<OneClickResult> {
   const url = parseUnsubscribeUrl(target);
   if (!url) return { kind: "error", detail: "The unsubscribe URL is not a valid HTTPS address." };
+  // Browser tests: ".test" hosts never resolve, so the fake server answers for them instead.
+  if (fakeServicesUrl && url.hostname.endsWith(".test")) return sendToFakeServer(url);
 
   let resolved: Array<{ address: string; family: number }>;
   try {
@@ -93,4 +96,12 @@ export async function sendOneClickUnsubscribe(target: string): Promise<OneClickR
     }));
     req.end(body);
   });
+}
+
+async function sendToFakeServer(url: URL): Promise<OneClickResult> {
+  const response = await fetch(`${fakeServicesUrl}/one-click/${url.hostname}${url.pathname}`, { method: "POST", redirect: "manual" });
+  const status = response.status;
+  if (status >= 200 && status < 300) return { kind: "accepted", status };
+  if (status >= 300 && status < 400) return { kind: "redirected", status };
+  return { kind: "rejected", status };
 }

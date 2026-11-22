@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { google } from "googleapis";
+import { fakeServicesUrl } from "../test-hooks.ts";
 
 export const gmailStateCookie = "kickads-gmail-oauth-state";
 export const gmailReadonlyScope = "https://www.googleapis.com/auth/gmail.readonly";
@@ -17,7 +18,18 @@ export function createGoogleOAuthClient(origin?: string): GoogleOAuthClient {
     throw new Error("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not configured.");
   }
   const redirectUri = process.env.GOOGLE_REDIRECT_URI ?? (origin ? `${origin}/api/gmail/callback` : undefined);
-  return new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, redirectUri);
+  return new google.auth.OAuth2({
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    redirectUri,
+    ...(fakeServicesUrl ? {
+      endpoints: {
+        oauth2AuthBaseUrl: `${fakeServicesUrl}/o/oauth2/v2/auth`,
+        oauth2TokenUrl: `${fakeServicesUrl}/token`,
+        oauth2RevokeUrl: `${fakeServicesUrl}/revoke`,
+      },
+    } : {}),
+  });
 }
 
 export function getGmailAuthorizationUrl(client: GoogleOAuthClient, state: string) {
